@@ -1,17 +1,22 @@
 # Building `CS15.C15PAK`
 
 `CS15.C15PAK` contains converted Counter-Strike/Half-Life data. The source
-repository never tracks it. A matching pack may be attached manually to a
-private release for repository members who are authorized to use the source
-resources. Do not redistribute the pack or expose it through a public release.
-You can also build it locally from resources you are authorized to use.
+repository never tracks it. Private tag builds generate a matching pack for
+repository members who are authorized to use the source resources. Do not
+redistribute the pack or expose it through a public release. You can also build
+it locally from resources you are authorized to use.
+
+The private `v0.1.1` release also stores
+`CS15-original-cstrike-assets.zip`. It contains the `cstrike` directory used
+by CI, including `maps/fy_iceworld.bsp`, plus a SHA-256 sidecar. Tag builds
+download and verify this archive before preprocessing any assets.
 
 ## Required sources
 
 - a Counter-Strike 1.5 `cstrike` directory;
-- the matching Half-Life `valve` directory for WAD textures referenced by
-  `de_dust`;
-- an authorized `fy_iceworld.bsp` if you want the Iceworld menu entry.
+- an authorized `fy_iceworld.bsp` under `cstrike\maps`;
+- optionally, the matching Half-Life `valve` directory for every WAD texture
+  referenced by `de_dust`.
 
 The converter reads the inputs but never modifies them.
 
@@ -21,33 +26,17 @@ From the repository root:
 
 ```powershell
 $cstrike = 'D:\Games\Counter-Strike-1.5\cstrike'
-$valve = 'D:\Games\Counter-Strike-1.5\valve'
-$iceworld = 'D:\Games\Counter-Strike-1.5\cstrike\maps\fy_iceworld.bsp'
-
-python .\tools\assetc.py build `
-  --cstrike $cstrike `
-  --valve $valve `
-  --map de_dust `
-  --map de_dust2 `
-  --map "fy_iceworld=$iceworld" `
-  --weapon v_knife --weapon v_glock18 --weapon v_ak47 `
-  --weapon v_m4a1 --weapon v_usp `
-  --model player/terror/terror=player_terror `
-  --model player/urban/urban=player_urban `
-  --model p_ak47=p_ak47 --model p_m4a1=p_m4a1 `
-  --splash `
-  --audio `
-  --output .\build\assets\CS15.C15PAK `
-  --manifest .\build\assets\CS15.manifest.json
+.\tools\build-resource-pack.ps1 `
+  -Cstrike $cstrike `
+  -AllowMissing
 ```
 
-If your legally owned installation is missing a referenced WAD texture,
-`--allow-missing` can produce a development pack with marked placeholders.
-Do not use that switch for a fidelity release when the matching WAD is
-available.
-
-If `fy_iceworld.bsp` is unavailable, omit its `--map` argument. The other two
-maps will work, but selecting Iceworld will be rejected by resource preflight.
+The archived historical `cstrike` tree lacks three Half-Life WAD textures, so
+CI intentionally uses `-AllowMissing`. This produces the same three marked
+16x16 placeholders as the current M11 pack and keeps the output deterministic.
+If you have the matching `valve` WAD directory and want to replace those
+placeholders, invoke `assetc.py` directly with `--valve` and omit
+`--allow-missing`; the resulting pack hash will differ.
 
 ## Validate
 

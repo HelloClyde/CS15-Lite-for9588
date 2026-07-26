@@ -20,8 +20,8 @@ StudioMDL、贴图、动画和音效离线转换成紧凑资源，再由一个�
 
 > [!IMPORTANT]
 > 本仓库当前为私有仓库，私有 GitHub Release 提供与 BDA 配套的
-> `CS15.C15PAK`，仅供获得相关资源授权的仓库成员使用。不要将资源包公开、
-> 转发或随公开 fork 分发。源码仓库仍不跟踪原始 BSP、MDL、WAD、WAV；如需
+> `CS15.C15PAK`，并保存用于 CI 预处理的原始 `cstrike` 素材归档。它们仅供
+> 获得相关资源授权的仓库成员使用。不要公开、转发或随公开 fork 分发；如需
 > 自行重建资源包，请参阅 [资源包指南](RESOURCE_PACK.md)。
 
 ## 游戏截图
@@ -143,15 +143,17 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流会初始化 `sdk` submodule、下载并校验固定 MIPS 工具链、运行 C/Python 测试、
-构建 BDA，然后向 GitHub Release 上传：
+工作流首先检查仓库仍为私有，从固定的私有素材 Release 下载
+`CS15-original-cstrike-assets.zip` 并验证 SHA-256。随后离线预处理地图、模型、
+贴图、动画和音频，运行 C/Python 测试，构建 BDA，然后向 GitHub Release 上传：
 
 - `CS15Lite.bda` 与 SHA-256；
-- 带真机安装目录结构的 runtime ZIP；
+- CI 重新生成的 `CS15.C15PAK` 与 SHA-256；
+- 同时包含 BDA 和资源包真机目录结构的 runtime ZIP；
 - 资源转换器、格式文档和资源包指南组成的 resource-tools ZIP。
 
-CI 不会从商业资源生成 `CS15.C15PAK`；私有 Release 中的配套资源包由仓库
-所有者手动维护，并附带独立 SHA-256。
+原始素材归档固定保存在私有 `v0.1.1` Release，新的 tag 不会重复上传这份
+130 MB 归档。若仓库不是 private，素材下载步骤会主动失败。
 
 ## 目录
 
@@ -163,6 +165,8 @@ src/model/           紧凑 StudioMDL 与动画流
 src/render/          RGB565 世界/模型软件光栅器
 src/world/           BSP、碰撞和玩家移动
 tools/assetc.py      合法本地资源离线转换器
+tools/build-resource-pack.ps1
+                      从 cstrike 生成并校验资源包
 tools/build.ps1      BDA 交叉构建与静态内存门禁
 tests/               主机 C 测试与资源格式测试
 ```
@@ -173,7 +177,7 @@ tests/               主机 C 测试与资源格式测试
 Counter-Strike、Half-Life 及相关素材的权利归各自权利人所有；仓库中的游戏截图
 仅用于说明兼容性和开发状态。
 
-私有 Release 中的转换资源包仅供已获得对应游戏资源授权的成员使用，不得公开
-传播。若仓库重新转为公开，必须先移除该 Release 资源。
+私有 Release 中的原始素材归档和转换资源包仅供已获得对应游戏资源授权的成员
+使用，不得公开传播。若仓库重新转为公开，必须先移除这些 Release 资源。
 
 源代码按 [GNU GPL v2 or later](LICENSE) 发布。`sdk` submodule 保留其自身许可证。
