@@ -25,28 +25,9 @@ StudioMDL、贴图、动画和音效离线转换成紧凑资源，再由一个�
 
 ## 游戏截图
 
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/images/main-menu.png" alt="经典主菜单" width="100%"><br>
-      <sub>经典主菜单与横屏界面</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/images/gameplay-look.png" alt="触摸视角与 Glock" width="100%"><br>
-      <sub>de_dust、触摸视角与 Glock</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/images/ak47-animation.png" alt="AK-47 动画" width="100%"><br>
-      <sub>AK-47 Idle / Fire / Reload / Draw 动画</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/images/muzzle-sprites.png" alt="历史枪口火焰" width="100%"><br>
-      <sub>历史枪口火焰的离线降采样结果</sub>
-    </td>
-  </tr>
-</table>
+![CS15 Lite 游戏截图拼图](docs/images/gameplay-collage.png)
+
+<sub>主菜单、de_dust 实战、AK-47 动画与历史枪口火焰。</sub>
 
 ## 快速开始
 
