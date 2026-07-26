@@ -27,7 +27,7 @@ StudioMDL、贴图、动画和音效离线转换成紧凑资源，再由一个�
 
 ![CS15 Lite 游戏截图拼图](docs/images/gameplay-collage.png)
 
-<sub>主菜单、de_dust 实战、AK-47 动画与历史枪口火焰。</sub>
+<sub>经典主菜单与两张 de_dust 实战画面。</sub>
 
 ## 快速开始
 
