@@ -14,18 +14,18 @@ jobs:
 
     steps:
       - name: Checkout source and SDK submodule
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Cache MIPS toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: sdk/.toolchain
           key: bbk9588-mips-toolchain-15.2.0-windows
@@ -47,7 +47,7 @@ jobs:
         run: .\tools\package-release.ps1 -Tag $env:GITHUB_REF_NAME
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CS15-Lite-${{ github.ref_name }}
           path: build/release/*
