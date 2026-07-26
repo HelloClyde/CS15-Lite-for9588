@@ -115,7 +115,7 @@ jobs:
           This workflow downloads the authorized original cstrike archive
           from $($env:CS15_SOURCE_RELEASE), verifies its SHA-256, preprocesses
           maps/models/textures/animation/audio, and publishes the matching
-          CS15.C15PAK with the BDA and install ZIP.
+          CS15.C15PAK with the BDA and ready-to-copy 9588 install ZIP.
 
           Do not make the repository or these release assets public.
           "@

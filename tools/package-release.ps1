@@ -35,8 +35,8 @@ if (Test-Path -LiteralPath $releaseRoot) {
 }
 
 $runtimeStage = Join-Path $stagingRoot 'runtime'
-$programDirectory = Join-Path $runtimeStage 'A\应用\程序'
-$dataDirectory = Join-Path $runtimeStage 'A\应用\数据\CS15LITE'
+$programDirectory = Join-Path $runtimeStage '应用\程序'
+$dataDirectory = Join-Path $runtimeStage '应用\数据\CS15LITE'
 $resourceStage = Join-Path $stagingRoot 'resource-tools'
 New-Item -ItemType Directory -Force -Path @(
     $releaseRoot,
@@ -85,12 +85,29 @@ if ($packAvailable) {
         -Encoding ascii -Value "$packHash  CS15.C15PAK"
 }
 
-$runtimeZip = Join-Path $releaseRoot "CS15-Lite-runtime-$Tag.zip"
+$runtimeZip = Join-Path $releaseRoot "CS15-Lite-for-9588-$Tag.zip"
 $resourceZip = Join-Path $releaseRoot "CS15-Lite-resource-tools-$Tag.zip"
 Compress-Archive -Path (Join-Path $runtimeStage '*') `
     -DestinationPath $runtimeZip -CompressionLevel Optimal
 Compress-Archive -Path (Join-Path $resourceStage '*') `
     -DestinationPath $resourceZip -CompressionLevel Optimal
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::OpenRead($runtimeZip)
+try {
+    $entryNames = @($archive.Entries | ForEach-Object FullName)
+    $requiredEntries = @('应用/程序/CS15Lite.bda')
+    if ($packAvailable) {
+        $requiredEntries += '应用/数据/CS15LITE/CS15.C15PAK'
+    }
+    foreach ($requiredEntry in $requiredEntries) {
+        if ($entryNames -notcontains $requiredEntry) {
+            throw "Install ZIP is missing: $requiredEntry"
+        }
+    }
+} finally {
+    $archive.Dispose()
+}
 
 $hashPath = Join-Path $releaseRoot 'CS15Lite.bda.sha256'
 $hash = (

@@ -32,18 +32,28 @@ StudioMDL、贴图、动画和音效离线转换成紧凑资源，再由一个�
 
 ## 快速开始
 
-### 1. 下载程序
+### 1. 下载一键安装包
 
 从 [Releases](https://github.com/HelloClyde/CS15-Lite-for9588/releases/latest)
-下载 `CS15Lite.bda`，复制到：
+下载 `CS15-Lite-for-9588-<版本>.zip`。解压后，将其中的 `应用` 文件夹复制到
+9588 的 `A:\` 根目录并选择合并，即可同时安装程序和配套资源包。
+
+ZIP 内已经排好真机目录：
+
+```text
+应用\程序\CS15Lite.bda
+应用\数据\CS15LITE\CS15.C15PAK
+```
+
+### 2. 手动安装（可选）
+
+也可以从同一个 Release 单独下载 `CS15Lite.bda`，复制到：
 
 ```text
 A:\应用\程序\CS15Lite.bda
 ```
 
-### 2. 安装资源包
-
-从同一个私有 Release 下载配套的 `CS15.C15PAK`，复制到：
+再下载配套的 `CS15.C15PAK`，复制到：
 
 ```text
 A:\应用\数据\CS15LITE\CS15.C15PAK
@@ -149,7 +159,7 @@ SHA-256。随后离线预处理地图、模型、贴图、动画和音频，运�
 
 - `CS15Lite.bda` 与 SHA-256；
 - CI 重新生成的 `CS15.C15PAK` 与 SHA-256；
-- 同时包含 BDA 和资源包真机目录结构的 runtime ZIP；
+- `CS15-Lite-for-9588-<版本>.zip`：解压后可直接复制到 9588 的安装包；
 - 资源转换器、格式文档和资源包指南组成的 resource-tools ZIP。
 
 原始素材归档固定保存在 `v0.1.1` Release，新的 tag 不会重复上传这份
