@@ -1,0 +1,79 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^v[0-9A-Za-z._-]+$')]
+    [string]$Tag
+)
+
+$ErrorActionPreference = 'Stop'
+$projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$buildRoot = Join-Path $projectRoot 'build'
+$releaseRoot = Join-Path $buildRoot 'release'
+$stagingRoot = Join-Path $releaseRoot 'staging'
+$bdaSource = Join-Path $buildRoot 'engine\CS Lite.bda'
+
+if (-not (Test-Path -LiteralPath $bdaSource -PathType Leaf)) {
+    throw "Build the BDA first: $bdaSource"
+}
+if (Test-Path -LiteralPath $releaseRoot) {
+    $resolved = [IO.Path]::GetFullPath($releaseRoot)
+    $expectedPrefix = [IO.Path]::GetFullPath($buildRoot).TrimEnd('\') + '\'
+    if (-not $resolved.StartsWith(
+        $expectedPrefix, [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Refusing to clean outside build: $resolved"
+    }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+
+$runtimeStage = Join-Path $stagingRoot 'runtime'
+$programDirectory = Join-Path $runtimeStage 'A\应用\程序'
+$dataDirectory = Join-Path $runtimeStage 'A\应用\数据\CS15LITE'
+$resourceStage = Join-Path $stagingRoot 'resource-tools'
+New-Item -ItemType Directory -Force -Path @(
+    $releaseRoot,
+    $programDirectory,
+    $dataDirectory,
+    (Join-Path $resourceStage 'tools'),
+    (Join-Path $resourceStage 'docs')
+) | Out-Null
+
+$releaseBda = Join-Path $releaseRoot 'CS15Lite.bda'
+Copy-Item -LiteralPath $bdaSource -Destination $releaseBda
+Copy-Item -LiteralPath $bdaSource -Destination (
+    Join-Path $programDirectory 'CS15Lite.bda'
+)
+Copy-Item -LiteralPath (Join-Path $projectRoot 'RESOURCE_PACK.md') `
+    -Destination (Join-Path $dataDirectory 'RESOURCE-PACK.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') `
+    -Destination (Join-Path $runtimeStage 'LICENSE')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'NOTICE.md') `
+    -Destination (Join-Path $runtimeStage 'NOTICE.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'tools\assetc.py') `
+    -Destination (Join-Path $resourceStage 'tools\assetc.py')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\formats.md') `
+    -Destination (Join-Path $resourceStage 'docs\formats.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'RESOURCE_PACK.md') `
+    -Destination (Join-Path $resourceStage 'RESOURCE_PACK.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') `
+    -Destination (Join-Path $resourceStage 'LICENSE')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'NOTICE.md') `
+    -Destination (Join-Path $resourceStage 'NOTICE.md')
+
+$runtimeZip = Join-Path $releaseRoot "CS15-Lite-runtime-$Tag.zip"
+$resourceZip = Join-Path $releaseRoot "CS15-Lite-resource-tools-$Tag.zip"
+Compress-Archive -Path (Join-Path $runtimeStage '*') `
+    -DestinationPath $runtimeZip -CompressionLevel Optimal
+Compress-Archive -Path (Join-Path $resourceStage '*') `
+    -DestinationPath $resourceZip -CompressionLevel Optimal
+
+$hashPath = Join-Path $releaseRoot 'CS15Lite.bda.sha256'
+$hash = (
+    Get-FileHash -Algorithm SHA256 -LiteralPath $releaseBda
+).Hash.ToLowerInvariant()
+Set-Content -LiteralPath $hashPath -Encoding ascii `
+    -Value "$hash  CS15Lite.bda"
+
+Write-Host "Release directory: $releaseRoot"
+Get-ChildItem -LiteralPath $releaseRoot -File |
+    Select-Object Name, Length

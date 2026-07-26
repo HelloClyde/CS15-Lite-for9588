@@ -1,0 +1,11 @@
+/build/
+/.deps/
+/content/private/
+*.c15pak
+*.C15PAK
+*.bsp
+*.mdl
+*.wad
+*.wav
+__pycache__/
+*.pyc

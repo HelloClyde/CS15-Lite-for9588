@@ -1,0 +1,80 @@
+name: Tagged Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source and SDK submodule
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache MIPS toolchain
+        uses: actions/cache@v4
+        with:
+          path: sdk/.toolchain
+          key: bbk9588-mips-toolchain-15.2.0-windows
+
+      - name: Install verified MIPS toolchain
+        shell: pwsh
+        run: .\sdk\scripts\setup_toolchain.ps1
+
+      - name: Run host tests
+        shell: pwsh
+        run: .\tools\test.ps1
+
+      - name: Build BDA
+        shell: pwsh
+        run: .\tools\build.ps1 -Clean
+
+      - name: Package release files
+        shell: pwsh
+        run: .\tools\package-release.ps1 -Tag $env:GITHUB_REF_NAME
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CS15-Lite-${{ github.ref_name }}
+          path: build/release/*
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $notes = @"
+          Automated BBK 9588 build for $tag.
+
+          Release assets include the BDA, an install-layout runtime ZIP, and
+          the local resource conversion tools. Counter-Strike/Half-Life data
+          and generated CS15.C15PAK files are not redistributed; build the
+          pack from legally owned resources using RESOURCE_PACK.md.
+          "@
+          $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          Set-Content -LiteralPath $notesPath -Encoding utf8 -Value $notes
+          $assets = Get-ChildItem -LiteralPath 'build/release' -File |
+            ForEach-Object { $_.FullName }
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --verify-tag `
+              --title "CS15 Lite $tag" --notes-file $notesPath
+          }
