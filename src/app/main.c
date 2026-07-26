@@ -17,11 +17,12 @@
 #define ASSET_PATH \
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\CS15LITE\\CS15.C15PAK"
 /*
- * Exact offline-verified high-water budgets for the three-map pack.
- * Dust2 peaks at 744688 map bytes and 220800 texture bytes.
+ * M12 streams BSP visibility and stores compact nodes/leaves. Italy is the
+ * largest map at 863632 resident BSP bytes; Assault is the largest texture
+ * set at under 86 KB after offline 64-colour/32x32 world-texture reduction.
  */
-#define MAP_ARENA_BYTES 744704u
-#define TEXTURE_ARENA_BYTES 220800u
+#define MAP_ARENA_BYTES 864000u
+#define TEXTURE_ARENA_BYTES 86000u
 /*
  * Player skins are prefiltered to 16x16 offline. This leaves both team
  * meshes, both held weapons and the largest animated view model below 64 KiB
@@ -36,6 +37,10 @@
 #define HIT_FEEDBACK_MS 140u
 #define ROUND_END_MS 2500u
 #define ROUND_TIME_MS 90000u
+#define BOMB_TIME_MS 35000u
+#define BOMB_PLANT_MS 3000u
+#define BOMB_DEFUSE_MS 5000u
+#define BOMB_USE_DISTANCE 144u
 #define BOT_COUNT 7u
 #define BOT_TEAMMATES 3u
 #define BOT_MOVE_PER_TICK 4u
@@ -64,18 +69,36 @@ enum bot_difficulty {
 };
 
 enum map_id {
-    MAP_DE_DUST,
     MAP_DE_DUST2,
-    MAP_ICEWORLD,
+    MAP_CS_ASSAULT,
+    MAP_CS_ITALY,
     MAP_COUNT
 };
 
 enum weapon_id {
     WEAPON_KNIFE,
     WEAPON_GLOCK,
-    WEAPON_AK47,
-    WEAPON_M4A1,
     WEAPON_USP,
+    WEAPON_P228,
+    WEAPON_DEAGLE,
+    WEAPON_ELITE,
+    WEAPON_FIVESEVEN,
+    WEAPON_M3,
+    WEAPON_XM1014,
+    WEAPON_MAC10,
+    WEAPON_TMP,
+    WEAPON_MP5,
+    WEAPON_UMP45,
+    WEAPON_P90,
+    WEAPON_AK47,
+    WEAPON_SG552,
+    WEAPON_M4A1,
+    WEAPON_AUG,
+    WEAPON_SCOUT,
+    WEAPON_AWP,
+    WEAPON_G3SG1,
+    WEAPON_SG550,
+    WEAPON_M249,
     WEAPON_COUNT
 };
 
@@ -96,7 +119,32 @@ typedef struct c15_bot {
     uint8_t strafe_right;
     uint8_t burst_left;
     uint8_t combat;
+    uint8_t bomb_carrier;
+    uint8_t kills;
+    uint8_t deaths;
 } c15_bot_t;
+
+enum bomb_action {
+    BOMB_ACTION_NONE,
+    BOMB_ACTION_PLANT,
+    BOMB_ACTION_DEFUSE
+};
+
+typedef struct c15_bomb_state {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint32_t action_started;
+    uint32_t explode_at;
+    uint32_t next_beep;
+    uint8_t enabled;
+    uint8_t player_carrier;
+    uint8_t planted;
+    uint8_t defused;
+    uint8_t site;
+    uint8_t action;
+    uint8_t action_owner;
+} c15_bomb_state_t;
 
 typedef struct c15_nav_point_3d {
     int16_t x;
@@ -117,38 +165,21 @@ typedef struct c15_muzzle_sprite {
 } c15_muzzle_sprite_t;
 
 static const char *const g_map_assets[MAP_COUNT] = {
-    "maps/de_dust",
     "maps/de_dust2",
-    "maps/fy_iceworld"
+    "maps/cs_assault",
+    "maps/cs_italy"
 };
 
 static const char *const g_map_labels[MAP_COUNT] = {
-    "DE_DUST",
     "DE_DUST2",
-    "ICEWORLD"
+    "CS_ASSAULT",
+    "CS_ITALY"
 };
 
 static const char *const g_map_loading[MAP_COUNT] = {
-    "LOADING DE_DUST + PLAYERS",
     "LOADING DE_DUST2 + PLAYERS",
-    "LOADING ICEWORLD + PLAYERS"
-};
-
-/*
- * A 48-unit hull-safe centerline generated offline from de_dust hull 1.
- * It is shared by all bots; there is no per-bot path.
- */
-#define DUST_ROUTE_COUNT 187u
-/*
- * The 186 cardinal 48-unit steps use two bits each:
- * 0=+X, 1=-X, 2=+Y, 3=-Y.  This preserves the original hull-safe path
- * while reducing its resident footprint from 748 bytes to 47 bytes.
- */
-static const uint8_t g_dust_route_steps[] = {
-    0xaa,0x2a,0x02,0x00,0xa2,0xaa,0xaa,0xaa,0xaa,0xaa,0xaa,0x80,
-    0xaa,0xaa,0xaa,0x2a,0x00,0x00,0xa0,0xa8,0xaa,0x5a,0x59,0x95,
-    0x99,0xa9,0xaa,0xaa,0xaa,0x02,0x00,0x80,0xaa,0xaa,0xaa,0xaa,
-    0x99,0x59,0x66,0xa9,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    "LOADING CS_ASSAULT + PLAYERS",
+    "LOADING CS_ITALY + PLAYERS"
 };
 
 /*
@@ -165,40 +196,33 @@ static const c15_nav_point_3d_t g_dust2_route[] = {
     {-512, -672, 165}, {-736, -672, 165}, {-736, -800, 165}
 };
 
-static const c15_nav_point_3d_t g_iceworld_route[] = {
-    {384,   32, -195},
-    {384, -128, -195},
-    {384, -1152, -195},
-    {384, -1280, -195}
+static const c15_nav_point_3d_t g_assault_route[] = {
+    { 640,  160,  48}, { 640,  640,  48}, { 320,  960,  48},
+    {   0, 1280,  48}, {-288, 1600, 176}, {-288, 1728, 176},
+    {-496, 2352, 176}, {-528, 2384, 380}
+};
+
+static const c15_nav_point_3d_t g_italy_route[] = {
+    {-768,-1856,-203}, {-768,-1312,-203}, {-512,-1312,-203},
+    {-480,-1152,-190}, {-416,-1024,-171}, {-384, -704,-123},
+    {-288, -416,-115}, { 160, -416,-115}, { 256,  128,-123},
+    { 480,  384,-123}, { 704,  576,-107}, { 704,  832, -75},
+    { 704, 1088, -43}, { 704, 1344, -11}, { 672, 1600,  21},
+    { 640, 1888,  37}, { 320, 2112,  37}
 };
 
 #define DUST2_ROUTE_COUNT \
     ((uint32_t)(sizeof(g_dust2_route) / sizeof(g_dust2_route[0])))
-#define ICEWORLD_ROUTE_COUNT \
-    ((uint32_t)(sizeof(g_iceworld_route) / sizeof(g_iceworld_route[0])))
-
-static int32_t dust_route_z(uint8_t index)
-{
-    if (index <= 4u) return 100;
-    if (index == 5u) return 84;
-    if (index == 6u) return 68;
-    if (index <= 8u) return 52;
-    if (index <= 77u) return 36;
-    if (index == 78u) return 52;
-    if (index <= 111u) return 68;
-    if (index == 112u) return 52;
-    if (index <= 163u) return 36;
-    if (index <= 173u) {
-        return 28 - (int32_t)(index - 164u) * 12;
-    }
-    return -92;
-}
+#define ASSAULT_ROUTE_COUNT \
+    ((uint32_t)(sizeof(g_assault_route) / sizeof(g_assault_route[0])))
+#define ITALY_ROUTE_COUNT \
+    ((uint32_t)(sizeof(g_italy_route) / sizeof(g_italy_route[0])))
 
 static uint32_t map_route_count(uint32_t map_id)
 {
-    if (map_id == MAP_DE_DUST) return DUST_ROUTE_COUNT;
     if (map_id == MAP_DE_DUST2) return DUST2_ROUTE_COUNT;
-    return ICEWORLD_ROUTE_COUNT;
+    if (map_id == MAP_CS_ASSAULT) return ASSAULT_ROUTE_COUNT;
+    return ITALY_ROUTE_COUNT;
 }
 
 static int map_route_point(
@@ -209,33 +233,22 @@ static int map_route_point(
     int32_t *z
 )
 {
-    if (map_id == MAP_DE_DUST && index < DUST_ROUTE_COUNT) {
-        uint8_t step;
-        *x = -528;
-        *y = -1728;
-        for (step = 0u; step < index; ++step) {
-            uint8_t direction = (uint8_t)(
-                (g_dust_route_steps[step >> 2] >>
-                 ((step & 3u) * 2u)) & 3u
-            );
-            if (direction == 0u) *x += 48;
-            else if (direction == 1u) *x -= 48;
-            else if (direction == 2u) *y += 48;
-            else *y -= 48;
-        }
-        *z = dust_route_z(index);
-        return 1;
-    }
     if (map_id == MAP_DE_DUST2 && index < DUST2_ROUTE_COUNT) {
         *x = g_dust2_route[index].x;
         *y = g_dust2_route[index].y;
         *z = g_dust2_route[index].z;
         return 1;
     }
-    if (map_id == MAP_ICEWORLD && index < ICEWORLD_ROUTE_COUNT) {
-        *x = g_iceworld_route[index].x;
-        *y = g_iceworld_route[index].y;
-        *z = g_iceworld_route[index].z;
+    if (map_id == MAP_CS_ASSAULT && index < ASSAULT_ROUTE_COUNT) {
+        *x = g_assault_route[index].x;
+        *y = g_assault_route[index].y;
+        *z = g_assault_route[index].z;
+        return 1;
+    }
+    if (map_id == MAP_CS_ITALY && index < ITALY_ROUTE_COUNT) {
+        *x = g_italy_route[index].x;
+        *y = g_italy_route[index].y;
+        *z = g_italy_route[index].z;
         return 1;
     }
     return 0;
@@ -267,17 +280,53 @@ static const uint16_t *g_menu_background;
 static const char *const g_weapon_assets[WEAPON_COUNT] = {
     "mdl/v_knife",
     "mdl/v_glock18",
+    "mdl/v_usp",
+    "mdl/v_p228",
+    "mdl/v_deagle",
+    "mdl/v_elite",
+    "mdl/v_fiveseven",
+    "mdl/v_m3",
+    "mdl/v_xm1014",
+    "mdl/v_mac10",
+    "mdl/v_tmp",
+    "mdl/v_mp5",
+    "mdl/v_ump45",
+    "mdl/v_p90",
     "mdl/v_ak47",
+    "mdl/v_sg552",
     "mdl/v_m4a1",
-    "mdl/v_usp"
+    "mdl/v_aug",
+    "mdl/v_scout",
+    "mdl/v_awp",
+    "mdl/v_g3sg1",
+    "mdl/v_sg550",
+    "mdl/v_m249"
 };
 
 static const char *const g_weapon_animation_assets[WEAPON_COUNT] = {
     "anim/v_knife",
     "anim/v_glock18",
+    "anim/v_usp",
+    "anim/v_p228",
+    "anim/v_deagle",
+    "anim/v_elite",
+    "anim/v_fiveseven",
+    "anim/v_m3",
+    "anim/v_xm1014",
+    "anim/v_mac10",
+    "anim/v_tmp",
+    "anim/v_mp5",
+    "anim/v_ump45",
+    "anim/v_p90",
     "anim/v_ak47",
+    "anim/v_sg552",
     "anim/v_m4a1",
-    "anim/v_usp"
+    "anim/v_aug",
+    "anim/v_scout",
+    "anim/v_awp",
+    "anim/v_g3sg1",
+    "anim/v_sg550",
+    "anim/v_m249"
 };
 
 static const char *const g_difficulty_labels[BOT_DIFFICULTY_COUNT] = {
@@ -315,9 +364,27 @@ static const uint8_t g_bot_damage[BOT_DIFFICULTY_COUNT] = {
 static const char *const g_weapon_muzzle_assets[WEAPON_COUNT] = {
     "",
     "muzzle/v_glock18",
+    "muzzle/v_usp",
+    "muzzle/v_p228",
+    "muzzle/v_deagle",
+    "muzzle/v_elite",
+    "muzzle/v_fiveseven",
+    "muzzle/v_m3",
+    "muzzle/v_xm1014",
+    "muzzle/v_mac10",
+    "muzzle/v_tmp",
+    "muzzle/v_mp5",
+    "muzzle/v_ump45",
+    "muzzle/v_p90",
     "muzzle/v_ak47",
+    "muzzle/v_sg552",
     "muzzle/v_m4a1",
-    "muzzle/v_usp"
+    "muzzle/v_aug",
+    "muzzle/v_scout",
+    "muzzle/v_awp",
+    "muzzle/v_g3sg1",
+    "muzzle/v_sg550",
+    "muzzle/v_m249"
 };
 
 static int resource_pack_has(
@@ -325,8 +392,9 @@ static int resource_pack_has(
     uint32_t expected_type
 )
 {
-    const c15_pak_entry_t *entry = c15_pak_find(&g_pak, name);
-    if (entry && entry->type == expected_type) {
+    c15_pak_entry_t entry;
+    if (c15_pak_find(&g_pak, name, &entry) &&
+        entry.type == expected_type) {
         return 1;
     }
     lite_log_line("resource pack missing asset");
@@ -350,7 +418,7 @@ static int resource_pack_is_current(uint32_t map_id)
     };
     uint32_t index;
     int complete = resource_pack_has(
-        "meta/m11", C15_FOURCC('V','E','R','0')
+        "meta/m12", C15_FOURCC('V','E','R','0')
     );
     if (!resource_pack_has(
             "sound/game", C15_FOURCC('S','N','D','0'))) {
@@ -392,34 +460,65 @@ static int resource_pack_is_current(uint32_t map_id)
 }
 
 static const char *const g_weapon_labels[WEAPON_COUNT] = {
-    "KNIFE", "GLOCK", "AK47", "M4A1", "USP"
+    "KNIFE", "GLOCK", "USP", "P228", "DEAGLE", "ELITE", "FIVE7",
+    "M3", "XM1014", "MAC10", "TMP", "MP5", "UMP45", "P90",
+    "AK47", "SG552", "M4A1", "AUG", "SCOUT", "AWP", "G3SG1",
+    "SG550", "M249"
 };
 
 static const uint16_t g_weapon_capacity[WEAPON_COUNT] = {
-    0u, 20u, 30u, 30u, 12u
+    0u, 20u, 12u, 13u, 7u, 30u, 20u, 8u, 7u, 30u, 30u,
+    30u, 25u, 50u, 30u, 30u, 30u, 30u, 10u, 10u, 20u, 30u,
+    100u
 };
 
 static const uint16_t g_weapon_interval_ms[WEAPON_COUNT] = {
-    350u, 240u, 110u, 105u, 220u
+    350u, 240u, 220u, 220u, 250u, 180u, 220u, 875u, 250u,
+    85u, 90u, 85u, 95u, 70u, 110u, 95u, 105u, 95u, 1250u,
+    1450u, 250u, 250u, 80u
 };
 
 static const uint8_t g_weapon_damage[WEAPON_COUNT] = {
-    50u, 25u, 36u, 33u, 30u
+    50u, 25u, 30u, 32u, 54u, 26u, 25u, 72u, 62u, 29u, 23u,
+    26u, 30u, 25u, 36u, 34u, 33u, 32u, 75u, 100u, 60u, 65u,
+    32u
+};
+
+static const uint16_t g_weapon_price[WEAPON_COUNT] = {
+    0u, 400u, 500u, 600u, 650u, 800u, 750u, 1700u, 3000u,
+    1400u, 1250u, 1500u, 1700u, 2350u, 2500u, 3500u, 3100u,
+    3500u, 2750u, 4750u, 5000u, 4200u, 5750u
+};
+
+static const uint8_t g_weapon_automatic[WEAPON_COUNT] = {
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 1u, 1u,
+    1u, 1u, 1u, 1u, 1u, 1u, 0u, 0u, 1u, 1u, 1u
 };
 
 static const c15_model_view_t g_weapon_views[WEAPON_COUNT] = {
     {160, 120, 160, 0, 80},
     {160, 120, 160, 0, 80},
-    /*
-     * The AK47 idle/fire poses extend much farther toward the camera than
-     * the pistol poses.  A small depth bias keeps the receiver intact at
-     * the near plane; the matching focal length and upper-left shift retain
-     * the original first-person size while keeping the magazine and stock
-     * inside the 320x240 view.
-     */
-    {145, 88, 155, 40, 48},
     {160, 120, 160, 0, 80},
-    {160, 120, 160, 0, 80}
+    {160, 120, 160, 0, 80},
+    {160, 120, 160, 0, 80},
+    {154, 108, 155, 16, 62},
+    {160, 120, 160, 0, 80},
+    {148, 98, 155, 24, 56},
+    {148, 98, 155, 24, 56},
+    {150, 102, 155, 22, 58},
+    {150, 102, 155, 22, 58},
+    {150, 102, 155, 22, 58},
+    {150, 102, 155, 22, 58},
+    {150, 98, 155, 24, 56},
+    {145, 88, 155, 40, 48},
+    {146, 92, 155, 34, 50},
+    {148, 94, 155, 30, 52},
+    {146, 92, 155, 34, 50},
+    {146, 92, 155, 34, 50},
+    {146, 90, 155, 36, 48},
+    {146, 90, 155, 36, 48},
+    {146, 90, 155, 36, 48},
+    {146, 90, 155, 36, 48}
 };
 
 typedef struct c15_view_animation_state {
@@ -577,6 +676,11 @@ static void draw_controls(lite_framebuffer_t *fb, const lite_input_t *input)
         LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "CROUCH",
         (input->down & LITE_INPUT_MENU) != 0u
     );
+    draw_button(
+        fb, LITE_BUTTON_X, LITE_BUTTON_SCORE_Y,
+        LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "SCORE",
+        (input->down & LITE_INPUT_SCORE) != 0u
+    );
 }
 
 static void draw_fps(
@@ -629,17 +733,17 @@ static void draw_menu_chrome(
 
 static int load_menu_background(lite_arena_t *texture_arena)
 {
-    const c15_pak_entry_t *entry =
-        c15_pak_find(&g_pak, "ui/menu_splash");
+    c15_pak_entry_t entry;
     uint8_t header[16];
     uint32_t pixel_bytes;
     uint16_t *pixels;
-    if (!entry || entry->type != C15_FOURCC('I','M','G','0') ||
-        entry->packed_size < sizeof(header) ||
+    if (!c15_pak_find(&g_pak, "ui/menu_splash", &entry) ||
+        entry.type != C15_FOURCC('I','M','G','0') ||
+        entry.packed_size < sizeof(header) ||
         !c15_pak_validate_entry(
-            &g_pak, entry, g_load_scratch, sizeof(g_load_scratch)) ||
+            &g_pak, &entry, g_load_scratch, sizeof(g_load_scratch)) ||
         !c15_pak_read(
-            &g_pak, entry, 0u, header, sizeof(header)) ||
+            &g_pak, &entry, 0u, header, sizeof(header)) ||
         !bytes_equal(header, "C15IMG1\0", 8u) ||
         (uint16_t)(header[8] | ((uint16_t)header[9] << 8)) !=
             LITE_SCREEN_WIDTH ||
@@ -653,14 +757,14 @@ static int load_menu_background(lite_arena_t *texture_arena)
         ((uint32_t)header[15] << 24);
     if (pixel_bytes !=
             LITE_SCREEN_WIDTH * LITE_SCREEN_HEIGHT * 2u ||
-        entry->packed_size != sizeof(header) + pixel_bytes) {
+        entry.packed_size != sizeof(header) + pixel_bytes) {
         return 0;
     }
     pixels = (uint16_t *)lite_arena_alloc(
         texture_arena, pixel_bytes, 16u
     );
     if (!pixels || !c15_pak_read(
-            &g_pak, entry, sizeof(header), pixels, pixel_bytes)) {
+            &g_pak, &entry, sizeof(header), pixels, pixel_bytes)) {
         return 0;
     }
     g_menu_background = pixels;
@@ -700,9 +804,9 @@ static void draw_map_menu(lite_framebuffer_t *fb, uint32_t selection)
     uint16_t pale = lite_rgb565(211u, 214u, 190u);
     draw_menu_chrome(fb, "CREATE GAME - SELECT MAP");
     lite_fb_text(fb, 35, 68, "AVAILABLE MAPS", 1, pale);
-    draw_button(fb, 34, 84, 176, 27, "DE_DUST", selection == 0u);
-    draw_button(fb, 34, 116, 176, 27, "DE_DUST2", selection == 1u);
-    draw_button(fb, 34, 148, 176, 27, "ICEWORLD", selection == 2u);
+    draw_button(fb, 34, 84, 176, 27, "DE_DUST2", selection == 0u);
+    draw_button(fb, 34, 116, 176, 27, "CS_ASSAULT", selection == 1u);
+    draw_button(fb, 34, 148, 176, 27, "CS_ITALY", selection == 2u);
     draw_button(fb, 34, 188, 176, 25, "BACK", selection == 3u);
 }
 
@@ -730,27 +834,52 @@ static void draw_loading(
     lite_fb_text(fb, 38, 132, line, 1, white);
 }
 
+static uint32_t buy_window_start(uint32_t selection)
+{
+    uint32_t total = WEAPON_COUNT + 1u;
+    uint32_t start = selection > 2u ? selection - 2u : 0u;
+    if (start + 5u > total) {
+        start = total - 5u;
+    }
+    return start;
+}
+
 static void draw_buy_menu(
     lite_framebuffer_t *fb,
-    uint8_t team,
     uint32_t money,
     uint32_t selection,
-    uint8_t rifle_owned
+    const uint8_t owned[WEAPON_COUNT]
 )
 {
     uint16_t pale = lite_rgb565(211u, 214u, 190u);
     uint16_t gold = lite_rgb565(224u, 168u, 54u);
-    const char *pistol = team == TEAM_T ? "GLOCK  FREE" : "USP  FREE";
-    const char *rifle = team == TEAM_T ? "AK47  2500" : "M4A1  3100";
-    draw_menu_chrome(fb, "BUY EQUIPMENT");
-    lite_fb_text(fb, 34, 78, "MONEY", 1, pale);
-    lite_fb_u32(fb, 76, 78, money, 1, gold);
-    draw_button(fb, 34, 96, 184, 30, pistol, selection == 0u);
-    draw_button(fb, 34, 134, 184, 30, rifle, selection == 1u);
-    if (rifle_owned) {
-        lite_fb_text(fb, 224, 145, "OWNED", 1, gold);
+    uint32_t start = buy_window_start(selection);
+    uint32_t row;
+    draw_menu_chrome(fb, "BUY WEAPONS");
+    lite_fb_text(fb, 30, 74, "MONEY", 1, pale);
+    lite_fb_u32(fb, 72, 74, money, 1, gold);
+    for (row = 0u; row < 5u; ++row) {
+        uint32_t item = start + row;
+        int y = 88 + (int)row * 27;
+        if (item == WEAPON_COUNT) {
+            draw_button(
+                fb, 28, y, 194, 23, "START ROUND",
+                selection == item
+            );
+        } else {
+            draw_button(
+                fb, 28, y, 158, 23, g_weapon_labels[item],
+                selection == item
+            );
+            if (owned[item]) {
+                lite_fb_text(fb, 192, y + 8, "OWN", 1, gold);
+            } else {
+                lite_fb_u32(
+                    fb, 192, y + 8, g_weapon_price[item], 1, pale
+                );
+            }
+        }
     }
-    draw_button(fb, 34, 180, 184, 30, "START ROUND", selection == 2u);
 }
 
 static uint32_t movement_controls(const lite_input_t *input)
@@ -806,7 +935,7 @@ static int load_muzzle_sprite(
     lite_arena_t *model_arena, uint32_t weapon
 )
 {
-    const c15_pak_entry_t *entry;
+    c15_pak_entry_t entry;
     uint8_t *chunk;
     uint32_t frame_bytes;
     uint32_t expected;
@@ -814,19 +943,20 @@ static int load_muzzle_sprite(
     if (weapon == WEAPON_KNIFE) {
         return 1;
     }
-    entry = c15_pak_find(&g_pak, g_weapon_muzzle_assets[weapon]);
-    if (!entry || entry->type != C15_FOURCC('M','S','P','0') ||
-        entry->packed_size < 44u || entry->packed_size > 2048u) {
+    if (!c15_pak_find(
+            &g_pak, g_weapon_muzzle_assets[weapon], &entry) ||
+        entry.type != C15_FOURCC('M','S','P','0') ||
+        entry.packed_size < 44u || entry.packed_size > 2048u) {
         return 0;
     }
     chunk = (uint8_t *)lite_arena_alloc(
-        model_arena, entry->packed_size, 16u
+        model_arena, entry.packed_size, 16u
     );
     if (!chunk ||
         !c15_pak_read(
-            &g_pak, entry, 0u, chunk, entry->packed_size) ||
+            &g_pak, &entry, 0u, chunk, entry.packed_size) ||
         !bytes_equal(chunk, "MSP1", 4u) ||
-        read_u16(chunk + 4) != entry->packed_size) {
+        read_u16(chunk + 4) != entry.packed_size) {
         return 0;
     }
     g_muzzle.width = chunk[6];
@@ -844,7 +974,7 @@ static int load_muzzle_sprite(
         g_muzzle.frame_count == 0u || g_muzzle.frame_count > 4u ||
         g_muzzle.anchor_count == 0u || g_muzzle.anchor_count > 16u ||
         g_muzzle.display_size == 0u || g_muzzle.display_size > 64u ||
-        chunk[11] != 0u || expected != entry->packed_size) {
+        chunk[11] != 0u || expected != entry.packed_size) {
         bda_memset(&g_muzzle, 0, sizeof(g_muzzle));
         return 0;
     }
@@ -1068,6 +1198,7 @@ static int load_game_resources(
 static void initialize_round(
     c15_player_t *player,
     c15_bot_t bots[BOT_COUNT],
+    c15_bomb_state_t *bomb,
     uint8_t player_team,
     uint8_t difficulty,
     uint32_t map_id,
@@ -1085,6 +1216,8 @@ static void initialize_round(
     c15_player_spawn(player, &spawn);
     *player_health = 100u;
     for (index = 0u; index < BOT_COUNT; ++index) {
+        uint8_t previous_kills = bots[index].kills;
+        uint8_t previous_deaths = bots[index].deaths;
         uint8_t team = index < BOT_TEAMMATES ?
             player_team : enemy_team;
         uint32_t ordinal = index < BOT_TEAMMATES ?
@@ -1093,10 +1226,23 @@ static void initialize_round(
             spawn = g_map.spawn;
         }
         bda_memset(&bots[index], 0, sizeof(bots[index]));
+        bots[index].kills = previous_kills;
+        bots[index].deaths = previous_deaths;
         c15_player_spawn(&bots[index].mover, &spawn);
         bots[index].team = team;
-        bots[index].weapon = team == TEAM_T ?
-            WEAPON_AK47 : WEAPON_M4A1;
+        if (team == TEAM_T) {
+            static const uint8_t weapons[] = {
+                WEAPON_AK47, WEAPON_SG552, WEAPON_AWP, WEAPON_M249
+            };
+            bots[index].weapon =
+                weapons[index & 3u];
+        } else {
+            static const uint8_t weapons[] = {
+                WEAPON_M4A1, WEAPON_AUG, WEAPON_MP5, WEAPON_SG550
+            };
+            bots[index].weapon =
+                weapons[index & 3u];
+        }
         bots[index].health = 100u;
         bots[index].aim_seed = (uint16_t)(
             (now >> 3) ^ (index * 977u + 0x5a3du)
@@ -1109,6 +1255,23 @@ static void initialize_round(
         bots[index].next_decision =
             now + 300u + index * 71u;
         bots[index].strafe_right = (uint8_t)(index & 1u);
+    }
+    bda_memset(bomb, 0, sizeof(*bomb));
+    bomb->enabled = (uint8_t)(
+        map_id == MAP_DE_DUST2 &&
+        c15_map_bomb_site_count(&g_map) != 0u
+    );
+    if (bomb->enabled) {
+        if (player_team == TEAM_T) {
+            bomb->player_carrier = 1u;
+        } else {
+            for (index = 0u; index < BOT_COUNT; ++index) {
+                if (bots[index].team == TEAM_T) {
+                    bots[index].bomb_carrier = 1u;
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1146,6 +1309,42 @@ static int clear_line(
     return 1;
 }
 
+static int nearest_bomb_site(
+    const c15_map_t *map,
+    int32_t x,
+    int32_t y,
+    uint8_t *site_out,
+    int32_t *x_out,
+    int32_t *y_out,
+    int32_t *z_out
+)
+{
+    uint32_t count = c15_map_bomb_site_count(map);
+    uint32_t nearest = 0xffffffffu;
+    uint32_t index;
+    int found = 0;
+    for (index = 0u; index < count; ++index) {
+        int32_t site_x;
+        int32_t site_y;
+        int32_t site_z;
+        uint32_t distance;
+        if (!c15_map_bomb_site(
+                map, index, &site_x, &site_y, &site_z)) {
+            continue;
+        }
+        distance = distance_squared(x, y, site_x, site_y);
+        if (distance < nearest) {
+            nearest = distance;
+            *site_out = (uint8_t)index;
+            *x_out = site_x;
+            *y_out = site_y;
+            *z_out = site_z;
+            found = 1;
+        }
+    }
+    return found;
+}
+
 static void bot_logic(
     c15_bot_t bots[BOT_COUNT],
     c15_player_t *player,
@@ -1153,10 +1352,12 @@ static void bot_logic(
     uint16_t *player_health,
     uint8_t difficulty,
     uint32_t map_id,
+    const c15_bomb_state_t *bomb,
     uint32_t now,
     uint32_t *shots,
     uint32_t *hits,
-    uint32_t *sound_weapon
+    uint32_t *sound_weapon,
+    uint32_t *player_deaths
 )
 {
     uint32_t route_count = map_route_count(map_id);
@@ -1183,6 +1384,9 @@ static void bot_logic(
         uint32_t before_blocked;
         int32_t before_x;
         int32_t before_y;
+        int objective_active = 0;
+        int32_t objective_x = 0;
+        int32_t objective_y = 0;
         if (!bot->alive) {
             bot->moving = 0u;
             continue;
@@ -1237,13 +1441,34 @@ static void bot_logic(
                  bot->mover.x, bot->mover.y, bot->mover.z + 28,
                  target_x, target_y, target_z + 28
             );
+        if (bomb && bomb->enabled) {
+            if (bomb->planted && bot->team == TEAM_CT) {
+                objective_active = 1;
+                objective_x = bomb->x;
+                objective_y = bomb->y;
+            } else if (!bomb->planted && bot->bomb_carrier &&
+                       bot->team == TEAM_T &&
+                       bot->nav_index == 0u) {
+                uint8_t objective_site = 0u;
+                int32_t objective_z;
+                objective_active = nearest_bomb_site(
+                    &g_map, bot->mover.x, bot->mover.y,
+                    &objective_site, &objective_x,
+                    &objective_y, &objective_z
+                );
+                (void)objective_site;
+                (void)objective_z;
+            }
+        }
         move_x = target_x;
         move_y = target_y;
         if (!target_visible) {
             uint8_t previous_nav_index = bot->nav_index;
-            has_nav = map_route_point(
-                map_id, bot->nav_index, &nav_x, &nav_y, &nav_z
-            );
+            if (!objective_active) {
+                has_nav = map_route_point(
+                    map_id, bot->nav_index, &nav_x, &nav_y, &nav_z
+                );
+            }
             if (has_nav &&
                 distance_squared(
                     bot->mover.x, bot->mover.y,
@@ -1266,6 +1491,9 @@ static void bot_logic(
             if (has_nav) {
                 move_x = nav_x;
                 move_y = nav_y;
+            } else if (objective_active) {
+                move_x = objective_x;
+                move_y = objective_y;
             }
             bot->mover.yaw = yaw_from_delta(
                 move_x - bot->mover.x, move_y - bot->mover.y
@@ -1395,8 +1623,12 @@ static void bot_logic(
                 ++*hits;
                 if (*health <= g_bot_damage[difficulty]) {
                     *health = 0u;
+                    ++bot->kills;
                     if (target >= 0) {
                         bots[(uint32_t)target].alive = 0u;
+                        ++bots[(uint32_t)target].deaths;
+                    } else {
+                        ++*player_deaths;
                     }
                 } else {
                     *health = (uint16_t)(
@@ -1404,6 +1636,220 @@ static void bot_logic(
                     );
                 }
             }
+        }
+    }
+}
+
+static int bomb_near(
+    int32_t ax, int32_t ay, int32_t az,
+    int32_t bx, int32_t by, int32_t bz
+)
+{
+    return distance_squared(ax, ay, bx, by) <=
+            BOMB_USE_DISTANCE * BOMB_USE_DISTANCE &&
+        abs_i32(az - bz) <= 128u;
+}
+
+static void bomb_complete_plant(
+    c15_bomb_state_t *bomb,
+    int32_t x,
+    int32_t y,
+    int32_t z,
+    uint32_t now,
+    c15_audio_t *audio
+)
+{
+    bomb->x = x;
+    bomb->y = y;
+    bomb->z = z;
+    bomb->planted = 1u;
+    bomb->player_carrier = 0u;
+    bomb->action = BOMB_ACTION_NONE;
+    bomb->action_owner = 0u;
+    bomb->explode_at = now + BOMB_TIME_MS;
+    bomb->next_beep = now;
+    c15_audio_play(
+        audio, C15_SOUND_CUE_BOMB_PLANT,
+        C15_SOUND_CHANNEL_PLAYER
+    );
+}
+
+static void bomb_player_update(
+    c15_bomb_state_t *bomb,
+    const c15_player_t *player,
+    uint8_t player_team,
+    uint16_t player_health,
+    const lite_input_t *input,
+    uint32_t now,
+    c15_audio_t *audio
+)
+{
+    uint8_t site = 0u;
+    int32_t site_x = 0;
+    int32_t site_y = 0;
+    int32_t site_z = 0;
+    uint8_t wanted_action = BOMB_ACTION_NONE;
+    uint32_t duration = 0u;
+    if (!bomb->enabled || player_health == 0u) {
+        if (bomb->action_owner == 1u) {
+            bomb->action = BOMB_ACTION_NONE;
+            bomb->action_owner = 0u;
+        }
+        return;
+    }
+    if (bomb->planted && !bomb->defused &&
+        player_team == TEAM_CT &&
+        bomb_near(
+            player->x, player->y, player->z,
+            bomb->x, bomb->y, bomb->z)) {
+        wanted_action = BOMB_ACTION_DEFUSE;
+        duration = BOMB_DEFUSE_MS;
+    } else if (!bomb->planted && bomb->player_carrier &&
+               player_team == TEAM_T &&
+               nearest_bomb_site(
+                   &g_map, player->x, player->y,
+                   &site, &site_x, &site_y, &site_z) &&
+               bomb_near(
+                   player->x, player->y, player->z,
+                   site_x, site_y, site_z)) {
+        wanted_action = BOMB_ACTION_PLANT;
+        duration = BOMB_PLANT_MS;
+    }
+    if (wanted_action == BOMB_ACTION_NONE ||
+        (input->down & LITE_INPUT_USE) == 0u) {
+        if (bomb->action_owner == 1u) {
+            bomb->action = BOMB_ACTION_NONE;
+            bomb->action_owner = 0u;
+        }
+        return;
+    }
+    if (bomb->action != wanted_action || bomb->action_owner != 1u) {
+        bomb->action = wanted_action;
+        bomb->action_owner = 1u;
+        bomb->action_started = now;
+        if (wanted_action == BOMB_ACTION_DEFUSE) {
+            c15_audio_play(
+                audio, C15_SOUND_CUE_BOMB_DISARM,
+                C15_SOUND_CHANNEL_PLAYER
+            );
+        }
+        return;
+    }
+    if (time_reached(now, bomb->action_started + duration)) {
+        if (wanted_action == BOMB_ACTION_PLANT) {
+            bomb->site = site;
+            bomb_complete_plant(
+                bomb, site_x, site_y, site_z, now, audio
+            );
+        } else {
+            bomb->defused = 1u;
+            bomb->action = BOMB_ACTION_NONE;
+            bomb->action_owner = 0u;
+            c15_audio_play(
+                audio, C15_SOUND_CUE_BOMB_DISARMED,
+                C15_SOUND_CHANNEL_PLAYER
+            );
+        }
+    }
+}
+
+static void bomb_bot_update(
+    c15_bomb_state_t *bomb,
+    c15_bot_t bots[BOT_COUNT],
+    uint8_t player_team,
+    uint16_t player_health,
+    uint32_t now,
+    c15_audio_t *audio
+)
+{
+    uint32_t index;
+    if (!bomb->enabled || bomb->defused) {
+        return;
+    }
+    if (bomb->player_carrier && player_team == TEAM_T &&
+        player_health == 0u) {
+        bomb->player_carrier = 0u;
+    }
+    if (!bomb->planted && !bomb->player_carrier) {
+        c15_bot_t *carrier = 0;
+        for (index = 0u; index < BOT_COUNT; ++index) {
+            if (bots[index].bomb_carrier && bots[index].alive) {
+                carrier = &bots[index];
+                break;
+            }
+            bots[index].bomb_carrier = 0u;
+        }
+        if (!carrier) {
+            for (index = 0u; index < BOT_COUNT; ++index) {
+                if (bots[index].alive && bots[index].team == TEAM_T) {
+                    bots[index].bomb_carrier = 1u;
+                    carrier = &bots[index];
+                    break;
+                }
+            }
+        }
+        if (carrier) {
+            uint8_t site = 0u;
+            int32_t site_x;
+            int32_t site_y;
+            int32_t site_z;
+            if (nearest_bomb_site(
+                    &g_map, carrier->mover.x, carrier->mover.y,
+                    &site, &site_x, &site_y, &site_z) &&
+                bomb_near(
+                    carrier->mover.x, carrier->mover.y,
+                    carrier->mover.z, site_x, site_y, site_z)) {
+                if (bomb->action != BOMB_ACTION_PLANT ||
+                    bomb->action_owner != 2u) {
+                    bomb->action = BOMB_ACTION_PLANT;
+                    bomb->action_owner = 2u;
+                    bomb->action_started = now;
+                } else if (time_reached(
+                               now,
+                               bomb->action_started + BOMB_PLANT_MS)) {
+                    bomb->site = site;
+                    carrier->bomb_carrier = 0u;
+                    bomb_complete_plant(
+                        bomb, site_x, site_y, site_z, now, audio
+                    );
+                }
+            } else if (bomb->action_owner == 2u) {
+                bomb->action = BOMB_ACTION_NONE;
+                bomb->action_owner = 0u;
+            }
+        }
+    } else if (bomb->planted) {
+        c15_bot_t *defuser = 0;
+        for (index = 0u; index < BOT_COUNT; ++index) {
+            if (bots[index].alive && bots[index].team == TEAM_CT &&
+                bomb_near(
+                    bots[index].mover.x, bots[index].mover.y,
+                    bots[index].mover.z,
+                    bomb->x, bomb->y, bomb->z)) {
+                defuser = &bots[index];
+                break;
+            }
+        }
+        if (defuser && bomb->action_owner != 1u) {
+            if (bomb->action != BOMB_ACTION_DEFUSE ||
+                bomb->action_owner != 2u) {
+                bomb->action = BOMB_ACTION_DEFUSE;
+                bomb->action_owner = 2u;
+                bomb->action_started = now;
+            } else if (time_reached(
+                           now,
+                           bomb->action_started + BOMB_DEFUSE_MS)) {
+                bomb->defused = 1u;
+                bomb->action = BOMB_ACTION_NONE;
+                bomb->action_owner = 0u;
+                c15_audio_play(
+                    audio, C15_SOUND_CUE_BOMB_DISARMED,
+                    C15_SOUND_CHANNEL_BOT
+                );
+            }
+        } else if (bomb->action_owner == 2u) {
+            bomb->action = BOMB_ACTION_NONE;
+            bomb->action_owner = 0u;
         }
     }
 }
@@ -1523,10 +1969,12 @@ static int player_fire_hit(
     if (bots[(uint32_t)selected].health <= g_weapon_damage[weapon]) {
         bots[(uint32_t)selected].health = 0u;
         bots[(uint32_t)selected].alive = 0u;
+        ++bots[(uint32_t)selected].deaths;
         *money += 300u;
         if (*money > 16000u) {
             *money = 16000u;
         }
+        return 2;
     } else {
         bots[(uint32_t)selected].health = (uint16_t)(
             bots[(uint32_t)selected].health -
@@ -1556,6 +2004,52 @@ static void team_counts(
         if (bots[index].team == TEAM_T) ++*t_alive;
         else ++*ct_alive;
     }
+}
+
+static void draw_scoreboard(
+    lite_framebuffer_t *fb,
+    const c15_bot_t bots[BOT_COUNT],
+    uint8_t player_team,
+    uint32_t player_kills,
+    uint32_t player_deaths,
+    uint32_t rounds_t,
+    uint32_t rounds_ct
+)
+{
+    uint16_t white = lite_rgb565(238u, 244u, 239u);
+    uint16_t gold = lite_rgb565(244u, 181u, 46u);
+    uint16_t red = lite_rgb565(235u, 78u, 64u);
+    uint16_t green = lite_rgb565(82u, 203u, 122u);
+    uint32_t index;
+    lite_fb_blend_rect(fb, 42, 24, 214, 190, lite_rgb565(12u, 22u, 22u));
+    lite_fb_frame(fb, 42, 24, 214, 190, gold);
+    lite_fb_text(fb, 92, 32, "SCOREBOARD", 1, gold);
+    lite_fb_text(fb, 53, 48, "NAME", 1, white);
+    lite_fb_text(fb, 142, 48, "TEAM", 1, white);
+    lite_fb_text(fb, 194, 48, "K", 1, white);
+    lite_fb_text(fb, 224, 48, "D", 1, white);
+    lite_fb_text(fb, 53, 63, "YOU", 1, gold);
+    lite_fb_text(
+        fb, 142, 63, player_team == TEAM_T ? "T" : "CT", 1,
+        player_team == TEAM_T ? red : green
+    );
+    lite_fb_u32(fb, 194, 63, player_kills, 1, white);
+    lite_fb_u32(fb, 224, 63, player_deaths, 1, white);
+    for (index = 0u; index < BOT_COUNT; ++index) {
+        int y = 79 + (int)index * 16;
+        lite_fb_text(fb, 53, y, "BOT", 1, white);
+        lite_fb_u32(fb, 74, y, index + 1u, 1, white);
+        lite_fb_text(
+            fb, 142, y, bots[index].team == TEAM_T ? "T" : "CT", 1,
+            bots[index].team == TEAM_T ? red : green
+        );
+        lite_fb_u32(fb, 194, y, bots[index].kills, 1, white);
+        lite_fb_u32(fb, 224, y, bots[index].deaths, 1, white);
+    }
+    lite_fb_text(fb, 62, 195, "T", 1, red);
+    lite_fb_u32(fb, 74, 195, rounds_t, 1, white);
+    lite_fb_text(fb, 146, 195, "CT", 1, green);
+    lite_fb_u32(fb, 164, 195, rounds_ct, 1, white);
 }
 
 static void draw_fire_feedback(
@@ -1705,6 +2199,10 @@ static void render_game(
     uint16_t player_health,
     uint32_t money,
     uint32_t round,
+    uint32_t rounds_t,
+    uint32_t rounds_ct,
+    uint32_t player_kills,
+    uint32_t player_deaths,
     uint32_t fps_x10,
     uint32_t map_id,
     uint32_t weapon,
@@ -1713,6 +2211,7 @@ static void render_game(
     uint32_t muzzle_frame,
     uint32_t fire_pose_frame,
     uint32_t ammo,
+    const c15_bomb_state_t *bomb,
     enum game_screen screen,
     uint8_t round_winner,
     c15_render_stats_t *stats,
@@ -1796,6 +2295,30 @@ static void render_game(
     lite_fb_u32(fb, 167, 4, ct_alive, 1, white);
     lite_fb_text(fb, 188, 4, "R", 1, accent);
     lite_fb_u32(fb, 200, 4, round, 1, white);
+    if (bomb->enabled) {
+        if (bomb->planted && !bomb->defused) {
+            uint32_t remaining = time_reached(now, bomb->explode_at) ?
+                0u : (bomb->explode_at - now + 999u) / 1000u;
+            lite_fb_text(fb, 70, 4, "C4", 1, red);
+            lite_fb_u32(fb, 88, 4, remaining, 1, accent);
+        } else if (bomb->player_carrier && player_team == TEAM_T) {
+            lite_fb_text(fb, 70, 4, "C4", 1, accent);
+        }
+        if (bomb->action_owner == 1u &&
+            bomb->action != BOMB_ACTION_NONE) {
+            uint32_t duration = bomb->action == BOMB_ACTION_PLANT ?
+                BOMB_PLANT_MS : BOMB_DEFUSE_MS;
+            uint32_t elapsed = now - bomb->action_started;
+            int width;
+            if (elapsed > duration) elapsed = duration;
+            width = (int)(elapsed * 120u / duration);
+            lite_fb_blend_rect(
+                fb, 74, 198, 128, 14, lite_rgb565(18u, 31u, 31u)
+            );
+            lite_fb_frame(fb, 74, 198, 128, 14, accent);
+            lite_fb_rect(fb, 78, 202, width, 6, accent);
+        }
+    }
     lite_fb_blend_rect(fb, 2, 218, 155, 20, lite_rgb565(18u, 31u, 31u));
     lite_fb_text(fb, 7, 224, "HP", 1, green);
     lite_fb_u32(
@@ -1827,10 +2350,16 @@ static void render_game(
         );
         lite_fb_text(fb, 98, 119, "NEXT ROUND", 1, white);
     }
+    if ((input->down & LITE_INPUT_SCORE) != 0u) {
+        draw_scoreboard(
+            fb, bots, player_team,
+            player_kills, player_deaths, rounds_t, rounds_ct
+        );
+    }
 }
 
 static uint32_t menu_touch_item(
-    enum game_screen screen, int x, int y
+    enum game_screen screen, int x, int y, uint32_t selection
 )
 {
     if (x < 20 || x > 230) return 0xffffffffu;
@@ -1853,9 +2382,11 @@ static uint32_t menu_touch_item(
         if (y >= 158 && y < 191) return 2u;
         if (y >= 190 && y < 225) return 3u;
     } else if (screen == SCREEN_BUY) {
-        if (y >= 90 && y < 130) return 0u;
-        if (y >= 130 && y < 170) return 1u;
-        if (y >= 174 && y < 220) return 2u;
+        if (y >= 86 && y < 226) {
+            uint32_t row = (uint32_t)(y - 86) / 27u;
+            uint32_t item = buy_window_start(selection) + row;
+            return item <= WEAPON_COUNT ? item : 0xffffffffu;
+        }
     }
     return 0xffffffffu;
 }
@@ -1885,6 +2416,7 @@ int bda_main(void)
     c15_camera_t camera;
     c15_player_t player;
     c15_bot_t bots[BOT_COUNT];
+    c15_bomb_state_t bomb;
     c15_render_stats_t stats = {0};
     c15_model_render_stats_t view_stats = {0};
     c15_model_render_stats_t entity_stats = {0};
@@ -1904,7 +2436,7 @@ int bda_main(void)
     uint32_t frame = 0u;
     uint32_t fps_x10 = 0u;
     uint32_t pending_controls = 0u;
-    uint32_t map_id = MAP_DE_DUST;
+    uint32_t map_id = MAP_DE_DUST2;
     uint32_t weapon = WEAPON_GLOCK;
     uint32_t fire_until = 0u;
     uint32_t hit_until = 0u;
@@ -1921,9 +2453,11 @@ int bda_main(void)
     uint32_t round_deadline = 0u;
     uint32_t rounds_t = 0u;
     uint32_t rounds_ct = 0u;
+    uint32_t player_kills = 0u;
+    uint32_t player_deaths = 0u;
     uint32_t reload_weapon = WEAPON_GLOCK;
-    uint16_t weapon_ammo[WEAPON_COUNT] = {0u, 20u, 30u, 30u, 12u};
-    uint8_t owned[WEAPON_COUNT] = {1u, 0u, 0u, 0u, 0u};
+    uint16_t weapon_ammo[WEAPON_COUNT];
+    uint8_t owned[WEAPON_COUNT];
     uint8_t player_team = TEAM_T;
     uint8_t bot_difficulty = BOT_EASY;
     uint8_t audio_enabled = 1u;
@@ -1939,9 +2473,12 @@ int bda_main(void)
     bda_memset(&audio, 0, sizeof(audio));
     bda_memset(&player, 0, sizeof(player));
     bda_memset(bots, 0, sizeof(bots));
+    bda_memset(&bomb, 0, sizeof(bomb));
+    bda_memset(weapon_ammo, 0, sizeof(weapon_ammo));
+    bda_memset(owned, 0, sizeof(owned));
     lite_log_reset();
-    lite_log_line("CS15 Lite M11A start");
-    lite_log_line("game_flow=main-map-team-buy-round");
+    lite_log_line("CS15 Lite M12 start");
+    lite_log_line("game_flow=maps-full-buy-c4-scoreboard");
     lite_log_line("bot_ai=range-strafe-burst");
     lite_log_line("bot_animation=goldsrc-hybrid-walk");
     lite_log_line("muzzle_flash=historical_additive_sprite");
@@ -2017,7 +2554,7 @@ int bda_main(void)
             }
             if (touch_new) {
                 uint32_t item = menu_touch_item(
-                    screen, input.touch_x, input.touch_y
+                    screen, input.touch_x, input.touch_y, selection
                 );
                 if (item != 0xffffffffu) {
                     selection = item;
@@ -2118,12 +2655,17 @@ int bda_main(void)
                             running = 0;
                             continue;
                         }
+                        bda_memset(owned, 0, sizeof(owned));
+                        bda_memset(
+                            weapon_ammo, 0, sizeof(weapon_ammo)
+                        );
+                        owned[WEAPON_KNIFE] = 1u;
                         owned[WEAPON_GLOCK] =
                             player_team == TEAM_T;
                         owned[WEAPON_USP] =
                             player_team == TEAM_CT;
                         initialize_round(
-                            &player, bots, player_team,
+                            &player, bots, &bomb, player_team,
                             bot_difficulty, map_id, now,
                             &player_health
                         );
@@ -2142,8 +2684,8 @@ int bda_main(void)
                         );
                         game_loaded = 1;
                         screen = SCREEN_BUY;
-                        selection = 0u;
-                        menu_count = 3u;
+                        selection = weapon;
+                        menu_count = WEAPON_COUNT + 1u;
                         next_logic = now;
                         lite_log_u32("pak_bytes", g_pak.file_size);
                         lite_log_u32("map_id", map_id);
@@ -2163,40 +2705,24 @@ int bda_main(void)
                         );
                     }
                 } else if (screen == SCREEN_BUY) {
-                    uint32_t pistol = player_team == TEAM_T ?
-                        WEAPON_GLOCK : WEAPON_USP;
-                    uint32_t rifle = player_team == TEAM_T ?
-                        WEAPON_AK47 : WEAPON_M4A1;
-                    uint32_t price = player_team == TEAM_T ? 2500u : 3100u;
-                    if (activated == 0u) {
-                        owned[pistol] = 1u;
-                        change_weapon(
-                            &model_arena, persistent_models,
-                            &weapon, pistol
-                        );
-                        reloading = 0;
-                        start_view_animation(
-                            &view_animation,
-                            C15_VIEW_ANIMATION_DRAW, now
-                        );
-                        weapon_ammo[pistol] = g_weapon_capacity[pistol];
-                    } else if (activated == 1u) {
-                        if (!owned[rifle] && money >= price) {
-                            money -= price;
-                            owned[rifle] = 1u;
+                    if (activated < WEAPON_COUNT) {
+                        if (!owned[activated] &&
+                            money >= g_weapon_price[activated]) {
+                            money -= g_weapon_price[activated];
+                            owned[activated] = 1u;
                         }
-                        if (owned[rifle]) {
+                        if (owned[activated]) {
                             change_weapon(
                                 &model_arena, persistent_models,
-                                &weapon, rifle
+                                &weapon, activated
                             );
                             reloading = 0;
                             start_view_animation(
                                 &view_animation,
                                 C15_VIEW_ANIMATION_DRAW, now
                             );
-                            weapon_ammo[rifle] =
-                                g_weapon_capacity[rifle];
+                            weapon_ammo[activated] =
+                                g_weapon_capacity[activated];
                         }
                     } else {
                         screen = SCREEN_PLAY;
@@ -2225,12 +2751,19 @@ int bda_main(void)
                 );
                 c15_player_camera(&player, &camera);
             }
+            if (screen == SCREEN_PLAY) {
+                bomb_player_update(
+                    &bomb, &player, player_team, player_health,
+                    &input, now, &audio
+                );
+            }
             if (screen == SCREEN_PLAY &&
                 (input.pressed & LITE_INPUT_USE) != 0u &&
-                player_health != 0u) {
+                player_health != 0u &&
+                bomb.action_owner != 1u) {
                 screen = SCREEN_BUY;
                 selection = 0u;
-                menu_count = 3u;
+                menu_count = WEAPON_COUNT + 1u;
             }
             if (screen == SCREEN_PLAY &&
                 (input.pressed & LITE_INPUT_JUMP) != 0u) {
@@ -2272,7 +2805,7 @@ int bda_main(void)
                 (input.down & LITE_INPUT_FIRE) != 0u &&
                 time_reached(now, next_fire) &&
                 ((input.pressed & LITE_INPUT_FIRE) != 0u ||
-                 weapon == WEAPON_AK47 || weapon == WEAPON_M4A1) &&
+                 g_weapon_automatic[weapon]) &&
                 (weapon == WEAPON_KNIFE ||
                  weapon_ammo[weapon] != 0u)) {
                 if (weapon != WEAPON_KNIFE) {
@@ -2285,10 +2818,17 @@ int bda_main(void)
                 start_view_animation(
                     &view_animation, C15_VIEW_ANIMATION_FIRE, now
                 );
-                if (player_fire_hit(
-                        bots, &camera, player_team, weapon, &money)) {
-                    ++shots_hit;
-                    hit_until = now + HIT_FEEDBACK_MS;
+                {
+                    int hit = player_fire_hit(
+                        bots, &camera, player_team, weapon, &money
+                    );
+                    if (hit != 0) {
+                        ++shots_hit;
+                        hit_until = now + HIT_FEEDBACK_MS;
+                    }
+                    if (hit == 2) {
+                        ++player_kills;
+                    }
                 }
                 fire_started = now;
                 fire_until = now + FIRE_FEEDBACK_MS;
@@ -2310,9 +2850,22 @@ int bda_main(void)
                 bot_sound_weapon = WEAPON_COUNT;
                 bot_logic(
                     bots, &player, player_team,
-                    &player_health, bot_difficulty, map_id, now,
-                    &bot_shots, &bot_hits, &bot_sound_weapon
+                    &player_health, bot_difficulty, map_id, &bomb, now,
+                    &bot_shots, &bot_hits, &bot_sound_weapon,
+                    &player_deaths
                 );
+                bomb_bot_update(
+                    &bomb, bots, player_team, player_health,
+                    now, &audio
+                );
+                if (bomb.planted && !bomb.defused &&
+                    time_reached(now, bomb.next_beep)) {
+                    c15_audio_play(
+                        &audio, C15_SOUND_CUE_BOMB_BEEP,
+                        C15_SOUND_CHANNEL_PLAYER
+                    );
+                    bomb.next_beep = now + 1000u;
+                }
                 if (bot_sound_weapon < WEAPON_COUNT) {
                     c15_audio_play(
                         &audio, bot_sound_weapon,
@@ -2326,30 +2879,56 @@ int bda_main(void)
                     bots, player_team, player_health,
                     &t_alive, &ct_alive
                 );
-                if (t_alive == 0u || ct_alive == 0u ||
-                    (round_deadline != 0u &&
-                     time_reached(now, round_deadline))) {
-                    if (t_alive == 0u || ct_alive == 0u) {
-                        round_winner =
-                            t_alive != 0u ? TEAM_T : TEAM_CT;
-                    } else {
-                        /*
-                         * de_dust is a bomb map: if the simplified
-                         * no-C4 round timer expires, CT wins a tie.
-                         */
-                        round_winner =
-                            t_alive > ct_alive ? TEAM_T : TEAM_CT;
+                {
+                    int round_finished = 0;
+                    if (bomb.enabled) {
+                        if (bomb.defused) {
+                            round_winner = TEAM_CT;
+                            round_finished = 1;
+                        } else if (bomb.planted &&
+                                   time_reached(now, bomb.explode_at)) {
+                            round_winner = TEAM_T;
+                            round_finished = 1;
+                            c15_audio_play(
+                                &audio, C15_SOUND_CUE_BOMB_EXPLODE,
+                                C15_SOUND_CHANNEL_PLAYER
+                            );
+                        } else if (ct_alive == 0u) {
+                            round_winner = TEAM_T;
+                            round_finished = 1;
+                        } else if (!bomb.planted && t_alive == 0u) {
+                            round_winner = TEAM_CT;
+                            round_finished = 1;
+                        } else if (!bomb.planted &&
+                                   round_deadline != 0u &&
+                                   time_reached(now, round_deadline)) {
+                            round_winner = TEAM_CT;
+                            round_finished = 1;
+                        }
+                    } else if (t_alive == 0u || ct_alive == 0u ||
+                               (round_deadline != 0u &&
+                                time_reached(now, round_deadline))) {
+                        if (t_alive == 0u || ct_alive == 0u) {
+                            round_winner =
+                                t_alive != 0u ? TEAM_T : TEAM_CT;
+                        } else {
+                            round_winner =
+                                t_alive >= ct_alive ? TEAM_T : TEAM_CT;
+                        }
+                        round_finished = 1;
                     }
-                    if (round_winner == TEAM_T) ++rounds_t;
-                    else ++rounds_ct;
-                    if (round_winner == player_team) {
-                        money += 3250u;
-                    } else {
-                        money += 1400u;
+                    if (round_finished) {
+                        if (round_winner == TEAM_T) ++rounds_t;
+                        else ++rounds_ct;
+                        if (round_winner == player_team) {
+                            money += 3250u;
+                        } else {
+                            money += 1400u;
+                        }
+                        if (money > 16000u) money = 16000u;
+                        screen = SCREEN_ROUND_END;
+                        round_end_at = now + ROUND_END_MS;
                     }
-                    if (money > 16000u) money = 16000u;
-                    screen = SCREEN_ROUND_END;
-                    round_end_at = now + ROUND_END_MS;
                 }
                 next_logic += LOGIC_INTERVAL_MS;
                 ++logic_steps;
@@ -2358,7 +2937,7 @@ int bda_main(void)
                 time_reached(now, round_end_at)) {
                 ++round;
                 initialize_round(
-                    &player, bots, player_team,
+                    &player, bots, &bomb, player_team,
                     bot_difficulty, map_id, now,
                     &player_health
                 );
@@ -2374,8 +2953,8 @@ int bda_main(void)
                     &view_animation, C15_VIEW_ANIMATION_DRAW, now
                 );
                 screen = SCREEN_BUY;
-                selection = 0u;
-                menu_count = 3u;
+                selection = weapon;
+                menu_count = WEAPON_COUNT + 1u;
                 next_logic = now;
                 round_deadline = 0u;
             }
@@ -2402,23 +2981,21 @@ int bda_main(void)
             } else if (screen == SCREEN_TEAM) {
                 draw_team_menu(&framebuffer, selection);
             } else if (screen == SCREEN_BUY) {
-                uint32_t rifle = player_team == TEAM_T ?
-                    WEAPON_AK47 : WEAPON_M4A1;
                 draw_buy_menu(
-                    &framebuffer, player_team, money,
-                    selection, owned[rifle]
+                    &framebuffer, money, selection, owned
                 );
             } else {
                 render_game(
                     &framebuffer, &view, &input, now, &camera, &player,
                     bots, player_team, player_health, money, round,
+                    rounds_t, rounds_ct, player_kills, player_deaths,
                     fps_x10, map_id, weapon,
                     time_active(now, fire_until),
                     time_active(now, hit_until),
                     (now - fire_started) / 54u,
                     view_animation.action == C15_VIEW_ANIMATION_FIRE ?
                         view_animation.frame : 0u,
-                    weapon_ammo[weapon], screen, round_winner,
+                    weapon_ammo[weapon], &bomb, screen, round_winner,
                     &stats, &view_stats, &entity_stats
                 );
             }
@@ -2503,7 +3080,7 @@ int bda_main(void)
     c15_audio_stop(
         &audio, g_load_scratch, sizeof(g_load_scratch)
     );
-    lite_log_line("CS15 Lite M11A stop");
+    lite_log_line("CS15 Lite M12 stop");
     lite_log_close();
     c15_pak_close(&g_pak);
     lite_platform_close();

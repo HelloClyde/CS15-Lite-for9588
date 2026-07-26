@@ -19,6 +19,7 @@
 #define LITE_BUTTON_WEAPON_Y 70
 #define LITE_BUTTON_JUMP_Y 102
 #define LITE_BUTTON_CROUCH_Y 134
+#define LITE_BUTTON_SCORE_Y 166
 
 #define LITE_INPUT_UP        (1u << 0)
 #define LITE_INPUT_DOWN      (1u << 1)
@@ -31,6 +32,7 @@
 #define LITE_INPUT_LOOK_ZONE (1u << 8)
 #define LITE_INPUT_RELOAD    (1u << 9)
 #define LITE_INPUT_WEAPON    (1u << 10)
+#define LITE_INPUT_SCORE     (1u << 11)
 
 typedef struct lite_input {
     uint32_t down;

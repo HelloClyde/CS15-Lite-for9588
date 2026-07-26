@@ -415,6 +415,10 @@ static uint32_t hit_test(int x, int y)
             y < LITE_BUTTON_CROUCH_Y + LITE_BUTTON_HEIGHT) {
             return LITE_INPUT_MENU;
         }
+        if (y >= LITE_BUTTON_SCORE_Y &&
+            y < LITE_BUTTON_SCORE_Y + LITE_BUTTON_HEIGHT) {
+            return LITE_INPUT_SCORE;
+        }
     }
     if (x < (int)LITE_DISPLAY_VIEW_WIDTH &&
         y < (int)LITE_DISPLAY_VIEW_HEIGHT) {

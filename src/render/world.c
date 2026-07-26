@@ -4,12 +4,12 @@
 #include "bda_memory.h"
 #include "platform/bbk9588.h"
 
-/* de_dust surfaces peak at 15 vertices; five clip planes add at most five. */
+/* Current historical maps peak below 16 vertices; clipping can add five. */
 #define MAX_POLYGON_VERTICES 20
 #define NEAR_PLANE 8
 #define FOCAL_LENGTH ((int)LITE_VIEW_WIDTH / 2)
 #define SURF_PLANEBACK 0x8000u
-/* Offline PVS maxima: de_dust 1517, de_dust2 1478, fy_iceworld 227. */
+/* M12 peak visible set: cs_italy; keep room for all converted surfaces. */
 #define MAX_CACHED_VISIBLE_SURFACES 1536u
 
 typedef struct view_vertex {
@@ -262,6 +262,33 @@ static void edge_step(scan_edge_t *edge)
     edge->z += edge->dz;
 }
 
+static uint16_t shade_world_texel(uint16_t color, uint8_t light)
+{
+    uint32_t red = (color >> 11) & 31u;
+    uint32_t green = (color >> 5) & 63u;
+    uint32_t blue = color & 31u;
+    switch (light >> 6) {
+    case 0u:
+        red >>= 2;
+        green >>= 2;
+        blue >>= 2;
+        break;
+    case 1u:
+        red >>= 1;
+        green >>= 1;
+        blue >>= 1;
+        break;
+    case 2u:
+        red = (red * 3u) >> 2;
+        green = (green * 3u) >> 2;
+        blue = (blue * 3u) >> 2;
+        break;
+    default:
+        break;
+    }
+    return (uint16_t)((red << 11) | (green << 5) | blue);
+}
+
 static void draw_half(
     lite_framebuffer_t *fb,
     uint16_t *depth,
@@ -274,8 +301,6 @@ static void draw_half(
     c15_render_stats_t *stats
 )
 {
-    const uint16_t *palette = texture->shaded_palettes +
-        ((uint32_t)light >> 6) * 256u;
     int y;
     if (y_start < 0) {
         int skip = -y_start;
@@ -341,11 +366,15 @@ static void draw_half(
                     uint8_t texel = texture->pixels[
                         ty * texture->width + tx
                     ];
-                    if ((texture->flags & 1u) == 0u || texel != 255u) {
+                    if ((texture->flags & 1u) == 0u ||
+                        texel + 1u != texture->palette_count) {
                         depth[depth_index] = (uint16_t)(
                             depth_value > 65535u ? 65535u : depth_value
                         );
-                        fb->pixels[y * fb->stride + x] = palette[texel];
+                        fb->pixels[y * fb->stride + x] =
+                            shade_world_texel(
+                                texture->palette[texel], light
+                            );
                         ++stats->drawn_pixels;
                     }
                 }

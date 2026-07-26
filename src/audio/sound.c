@@ -44,18 +44,18 @@ int c15_audio_init(
     uint32_t scratch_size
 )
 {
-    const c15_pak_entry_t *entry;
+    c15_pak_entry_t entry;
     uint8_t *header = (uint8_t *)scratch;
     uint32_t index;
     bda_memset(audio, 0, sizeof(*audio));
-    entry = c15_pak_find(pak, "sound/game");
-    if (!entry || entry->type != C15_FOURCC('S','N','D','0') ||
+    if (!c15_pak_find(pak, "sound/game", &entry) ||
+        entry.type != C15_FOURCC('S','N','D','0') ||
         scratch_size < C15_SOUND_HEADER_BYTES ||
-        entry->packed_size < C15_SOUND_HEADER_BYTES ||
+        entry.packed_size < C15_SOUND_HEADER_BYTES ||
         !c15_pak_validate_entry(
-            pak, entry, scratch, scratch_size) ||
+            pak, &entry, scratch, scratch_size) ||
         !c15_pak_read(
-            pak, entry, 0u, header, C15_SOUND_HEADER_BYTES) ||
+            pak, &entry, 0u, header, C15_SOUND_HEADER_BYTES) ||
         !sound_magic(header) ||
         sound_u32(header + 8u) != BDA_AUDIO_SAMPLE_RATE_22050 ||
         sound_u16(header + 12u) != C15_SOUND_CUE_COUNT ||
@@ -67,8 +67,8 @@ int c15_audio_init(
         uint32_t size = sound_u32(header + 20u + index * 8u);
         if ((offset & 1u) != 0u || (size & 1u) != 0u ||
             offset < C15_SOUND_HEADER_BYTES ||
-            offset > entry->packed_size ||
-            size > entry->packed_size - offset) {
+            offset > entry.packed_size ||
+            size > entry.packed_size - offset) {
             return 0;
         }
         audio->cue_offsets[index] = offset;
@@ -139,7 +139,7 @@ int c15_audio_service(
     uint32_t channel;
     uint32_t active = 0u;
     int written;
-    if (!audio->enabled || !audio->opened || !audio->bank ||
+    if (!audio->enabled || !audio->opened || !audio->loaded ||
         scratch_size < C15_SOUND_BLOCK_BYTES * 2u) {
         return 0;
     }
@@ -162,7 +162,7 @@ int c15_audio_service(
         bytes = voice->remaining < C15_SOUND_BLOCK_BYTES ?
             voice->remaining : C15_SOUND_BLOCK_BYTES;
         if (!c15_pak_read(
-                pak, audio->bank, voice->offset, source, bytes)) {
+                pak, &audio->bank, voice->offset, source, bytes)) {
             voice->remaining = 0u;
             continue;
         }

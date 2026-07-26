@@ -49,6 +49,13 @@ $tests = @(
             (Join-Path $projectRoot 'tests\map_contents_test.c'),
             (Join-Path $projectRoot 'src\world\map.c')
         )
+    },
+    @{
+        Name = 'pak_test'
+        Sources = @(
+            (Join-Path $projectRoot 'tests\pak_test.c'),
+            (Join-Path $projectRoot 'src\assets\pak.c')
+        )
     }
 )
 

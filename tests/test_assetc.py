@@ -37,6 +37,40 @@ class AssetFormatTests(unittest.TestCase):
         self.assertEqual(result["entries"][0]["name"], "tex/test")
         self.assertEqual(len(pack) % 1, 0)
 
+    def test_world_texture_is_mip_selected_and_quantized_to_64_colors(self):
+        width = 64
+        height = 32
+        mip_sizes = [
+            width * height,
+            (width // 2) * (height // 2),
+            (width // 4) * (height // 4),
+            (width // 8) * (height // 8),
+        ]
+        offsets = []
+        cursor = 40
+        blob = bytearray(40 + sum(mip_sizes) + 2 + 256 * 3)
+        for level, size in enumerate(mip_sizes):
+            offsets.append(cursor)
+            blob[cursor:cursor + size] = bytes(
+                index & 0xff for index in range(size)
+            )
+            cursor += size
+        struct.pack_into("<H", blob, cursor, 256)
+        cursor += 2
+        for index in range(256):
+            blob[cursor + index * 3:cursor + index * 3 + 3] = bytes(
+                (index, 255 - index, index // 2)
+            )
+        texture = assetc.MipTexture(
+            "stone", width, height, tuple(offsets), bytes(blob), "test.wad"
+        )
+        chunk, detail = assetc.compile_texture(texture)
+        validated = assetc.validate_texture_chunk(chunk)
+        self.assertEqual(detail["selected_mip"], 1)
+        self.assertEqual((detail["width"], detail["height"]), (32, 16))
+        self.assertEqual(validated["palette_colors"], 64)
+        self.assertEqual(validated["resident_bytes"], 64 * 2 + 32 * 16)
+
     def test_corrupt_pack_crc_is_rejected(self):
         texture = assetc.TEX_HEADER.pack(
             b"CTX1", 1, 1, 0, 256, 1, 1, 1, 0, bytes(3)
@@ -78,6 +112,29 @@ class AssetFormatTests(unittest.TestCase):
     def test_name_normalization_is_enforced(self):
         with self.assertRaises(assetc.AssetError):
             assetc.build_pack([assetc.PakAsset(b"TEX0", "TEX/Bad", b"x")])
+
+    def test_pack_directory_is_sorted_for_bounded_runtime_lookup(self):
+        pack = assetc.build_pack([
+            assetc.PakAsset(b"TEST", "test/zulu", b"z"),
+            assetc.PakAsset(b"TEST", "test/alpha", b"a"),
+            assetc.PakAsset(b"TEST", "test/mike", b"m"),
+        ])
+        identifiers = [
+            assetc.PAK_ENTRY.unpack_from(
+                pack, assetc.PAK_HEADER.size + index * assetc.PAK_ENTRY.size
+            )[2]
+            for index in range(3)
+        ]
+        self.assertEqual(identifiers, sorted(identifiers))
+        swapped = bytearray(pack)
+        first = assetc.PAK_HEADER.size
+        second = first + assetc.PAK_ENTRY.size
+        left = bytes(swapped[first:second])
+        right = bytes(swapped[second:second + assetc.PAK_ENTRY.size])
+        swapped[first:second] = right
+        swapped[second:second + assetc.PAK_ENTRY.size] = left
+        with self.assertRaises(assetc.AssetError):
+            assetc.validate_pack(bytes(swapped))
 
     def test_model_chunk_roundtrip_and_bad_index(self):
         vertex_offset = assetc.MDL_HEADER.size
@@ -228,6 +285,41 @@ class AssetFormatTests(unittest.TestCase):
         )
         self.assertEqual([matrix[3] for matrix in matrices], [1, 3, 103, 6])
 
+    def test_bomb_sites_include_brush_centers_and_deduplicate_origins(self):
+        entities = b"""
+        {
+        "classname" "func_bomb_target"
+        "model" "*1"
+        }
+        {
+        "classname" "info_bomb_target"
+        "origin" "100 200 32"
+        }
+        {
+        "classname" "info_bomb_target"
+        "origin" "100 200 32"
+        }
+        """
+        models = [
+            tuple([0] * 16),
+            (-32, 100, 0, 32, 300, 64) + tuple([0] * 10),
+        ]
+        payload, sites = assetc.compile_bomb_sites(entities, models)
+        self.assertEqual(
+            sites,
+            [
+                {"x": 0, "y": 200, "z": 32},
+                {"x": 100, "y": 200, "z": 32},
+            ],
+        )
+        self.assertEqual(
+            [
+                assetc.BOMB_SITE.unpack_from(payload, offset)
+                for offset in range(0, len(payload), assetc.BOMB_SITE.size)
+            ],
+            [(0, 200, 32), (100, 200, 32)],
+        )
+
     def test_animation_chunk_roundtrip(self):
         vertex_count = 3
         frame_stride = vertex_count * assetc.ANM_POSITION.size
@@ -310,25 +402,59 @@ class AssetFormatTests(unittest.TestCase):
         )
 
     def test_historical_sound_bank_roundtrip(self):
-        names = [
-            "knife_slash1.wav", "glock18-1.wav", "ak47-1.wav",
-            "m4a1-1.wav", "usp1.wav", "generic_reload.wav",
-        ]
+        self.assertEqual(
+            assetc.SOUND_CUE_SOURCES,
+            (
+                "weapons/knife_slash1.wav",
+                "weapons/glock18-1.wav",
+                "weapons/usp1.wav",
+                "weapons/p228-1.wav",
+                "weapons/deagle-1.wav",
+                "weapons/elite_fire.wav",
+                "weapons/fiveseven-1.wav",
+                "weapons/m3-1.wav",
+                "weapons/xm1014-1.wav",
+                "weapons/mac10-1.wav",
+                "weapons/tmp-1.wav",
+                "weapons/mp5-1.wav",
+                "weapons/ump45-1.wav",
+                "weapons/p90-1.wav",
+                "weapons/ak47-1.wav",
+                "weapons/sg552-1.wav",
+                "weapons/m4a1-1.wav",
+                "weapons/aug-1.wav",
+                "weapons/scout_fire-1.wav",
+                "weapons/awp1.wav",
+                "weapons/g3sg1-1.wav",
+                "weapons/sg550-1.wav",
+                "weapons/m249-1.wav",
+                "weapons/generic_reload.wav",
+                "weapons/c4_plant.wav",
+                "weapons/c4_beep1.wav",
+                "weapons/c4_explode1.wav",
+                "weapons/c4_disarm.wav",
+                "weapons/c4_disarmed.wav",
+            ),
+        )
         with tempfile.TemporaryDirectory() as directory:
             cstrike = Path(directory)
-            weapons = cstrike / "sound" / "weapons"
-            weapons.mkdir(parents=True)
-            for cue, name in enumerate(names):
-                with wave.open(str(weapons / name), "wb") as output:
+            for cue, relative in enumerate(assetc.SOUND_CUE_SOURCES):
+                target = cstrike / "sound" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(target), "wb") as output:
                     output.setnchannels(1)
                     output.setsampwidth(1)
                     output.setframerate(22050)
                     output.writeframes(bytes([128 + cue, 127 - cue]) * 16)
             chunk, detail = assetc.compile_sound_bank(cstrike)
         self.assertEqual(detail["sample_rate"], 22050)
-        self.assertEqual(len(detail["cues"]), 6)
+        self.assertEqual(
+            len(detail["cues"]), len(assetc.SOUND_CUE_SOURCES)
+        )
         validated = assetc.validate_sound_chunk(chunk)
-        self.assertEqual(len(validated["cues"]), 6)
+        self.assertEqual(
+            len(validated["cues"]), len(assetc.SOUND_CUE_SOURCES)
+        )
         first_offset = validated["cues"][0]["offset"]
         self.assertEqual(
             struct.unpack_from("<h", chunk, first_offset)[0], 0

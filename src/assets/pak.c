@@ -7,7 +7,7 @@
 #define PAK_HEADER_BYTES 64u
 #define PAK_ENTRY_BYTES 64u
 #define PAK_ALIGNMENT 4096u
-#define PAK_VERSION 1u
+#define PAK_VERSION 2u
 #define PAK_ENDIAN 0x12345678u
 
 static uint32_t read_u32(const uint8_t *data)
@@ -36,6 +36,44 @@ static int names_equal(const char *left, const char *right)
         ++right;
     }
     return *left == *right;
+}
+
+static int read_entry_at(
+    const c15_pak_t *pak,
+    uint32_t index,
+    c15_pak_entry_t *entry
+)
+{
+    uint8_t record[PAK_ENTRY_BYTES];
+    uint32_t seek;
+    uint32_t name_index;
+    int terminated = 0;
+    if (!pak || !entry || index >= pak->entry_count ||
+        !bda_fs_file_is_valid(pak->file)) {
+        return 0;
+    }
+    seek = pak->directory_offset + index * PAK_ENTRY_BYTES;
+    if (bda_fs_seek_raw(pak->file, (s32)seek, BDA_SEEK_SET) !=
+            (int)seek ||
+        bda_fs_read_raw(pak->file, record, sizeof(record)) !=
+            (int)sizeof(record)) {
+        return 0;
+    }
+    entry->type = read_u32(record);
+    entry->flags = read_u32(record + 4);
+    entry->asset_id = read_u32(record + 8);
+    entry->offset = read_u32(record + 12);
+    entry->packed_size = read_u32(record + 16);
+    entry->unpacked_size = read_u32(record + 20);
+    entry->crc32 = read_u32(record + 24);
+    for (name_index = 0u; name_index < 32u; ++name_index) {
+        entry->name[name_index] = (char)record[28u + name_index];
+        if (entry->name[name_index] == 0) {
+            terminated = 1;
+        }
+    }
+    entry->name[32] = 0;
+    return terminated;
 }
 
 uint32_t c15_crc32_update(uint32_t state, const void *data, uint32_t size)
@@ -72,10 +110,11 @@ uint32_t c15_asset_id(const char *name)
 int c15_pak_open(c15_pak_t *pak, const char *path)
 {
     uint8_t header[PAK_HEADER_BYTES];
-    uint8_t record[PAK_ENTRY_BYTES];
     uint32_t directory_offset;
     uint32_t data_offset;
     uint32_t index;
+    uint32_t previous_id = 0u;
+    uint32_t previous_end = 0u;
     int end;
 
     if (!pak || !path) {
@@ -115,36 +154,23 @@ int c15_pak_open(c15_pak_t *pak, const char *path)
         c15_pak_close(pak);
         return 0;
     }
+    pak->directory_offset = directory_offset;
+    pak->data_offset = data_offset;
     for (index = 0u; index < pak->entry_count; ++index) {
-        c15_pak_entry_t *entry = &pak->entries[index];
-        uint32_t seek = directory_offset + index * PAK_ENTRY_BYTES;
-        uint32_t name_index;
-        if (bda_fs_seek_raw(pak->file, (s32)seek, BDA_SEEK_SET) !=
-                (int)seek ||
-            bda_fs_read_raw(pak->file, record, sizeof(record)) !=
-                (int)sizeof(record)) {
+        c15_pak_entry_t entry;
+        if (!read_entry_at(pak, index, &entry) ||
+            entry.asset_id != c15_asset_id(entry.name) ||
+            (index != 0u && entry.asset_id <= previous_id) ||
+            entry.offset < data_offset ||
+            (entry.offset & (PAK_ALIGNMENT - 1u)) != 0u ||
+            entry.packed_size != entry.unpacked_size ||
+            entry.offset > pak->file_size - entry.packed_size ||
+            (index != 0u && entry.offset < previous_end)) {
             c15_pak_close(pak);
             return 0;
         }
-        entry->type = read_u32(record);
-        entry->flags = read_u32(record + 4);
-        entry->asset_id = read_u32(record + 8);
-        entry->offset = read_u32(record + 12);
-        entry->packed_size = read_u32(record + 16);
-        entry->unpacked_size = read_u32(record + 20);
-        entry->crc32 = read_u32(record + 24);
-        for (name_index = 0u; name_index < 32u; ++name_index) {
-            entry->name[name_index] = (char)record[28u + name_index];
-        }
-        entry->name[32] = 0;
-        if (entry->asset_id != c15_asset_id(entry->name) ||
-            entry->offset < data_offset ||
-            (entry->offset & (PAK_ALIGNMENT - 1u)) != 0u ||
-            entry->packed_size != entry->unpacked_size ||
-            entry->offset > pak->file_size - entry->packed_size) {
-            c15_pak_close(pak);
-            return 0;
-        }
+        previous_id = entry.asset_id;
+        previous_end = entry.offset + entry.packed_size;
     }
     return 1;
 }
@@ -160,38 +186,63 @@ void c15_pak_close(c15_pak_t *pak)
     pak->file = 0;
     pak->file_size = 0u;
     pak->entry_count = 0u;
+    pak->directory_offset = 0u;
+    pak->data_offset = 0u;
 }
 
-const c15_pak_entry_t *c15_pak_find(
-    const c15_pak_t *pak, const char *name
+int c15_pak_find(
+    const c15_pak_t *pak,
+    const char *name,
+    c15_pak_entry_t *entry
 )
 {
     uint32_t identifier;
-    uint32_t index;
-    if (!pak || !name) {
+    uint32_t low = 0u;
+    uint32_t high;
+    if (!pak || !name || !entry) {
         return 0;
     }
     identifier = c15_asset_id(name);
-    for (index = 0u; index < pak->entry_count; ++index) {
-        if (pak->entries[index].asset_id == identifier &&
-            names_equal(pak->entries[index].name, name)) {
-            return &pak->entries[index];
+    high = pak->entry_count;
+    while (low < high) {
+        uint32_t middle = low + (high - low) / 2u;
+        if (!read_entry_at(pak, middle, entry)) {
+            return 0;
+        }
+        if (entry->asset_id < identifier) {
+            low = middle + 1u;
+        } else if (entry->asset_id > identifier) {
+            high = middle;
+        } else {
+            return names_equal(entry->name, name);
         }
     }
     return 0;
 }
 
-const c15_pak_entry_t *c15_pak_find_id(
-    const c15_pak_t *pak, uint32_t asset_id
+int c15_pak_find_id(
+    const c15_pak_t *pak,
+    uint32_t asset_id,
+    c15_pak_entry_t *entry
 )
 {
-    uint32_t index;
-    if (!pak) {
+    uint32_t low = 0u;
+    uint32_t high;
+    if (!pak || !entry) {
         return 0;
     }
-    for (index = 0u; index < pak->entry_count; ++index) {
-        if (pak->entries[index].asset_id == asset_id) {
-            return &pak->entries[index];
+    high = pak->entry_count;
+    while (low < high) {
+        uint32_t middle = low + (high - low) / 2u;
+        if (!read_entry_at(pak, middle, entry)) {
+            return 0;
+        }
+        if (entry->asset_id < asset_id) {
+            low = middle + 1u;
+        } else if (entry->asset_id > asset_id) {
+            high = middle;
+        } else {
+            return 1;
         }
     }
     return 0;

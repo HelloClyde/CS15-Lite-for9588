@@ -53,11 +53,14 @@ jobs:
           Expand-Archive -LiteralPath $archive `
             -DestinationPath 'build/source-assets'
           foreach ($required in @(
-            'build/source-assets/cstrike/maps/de_dust.bsp',
             'build/source-assets/cstrike/maps/de_dust2.bsp',
-            'build/source-assets/cstrike/maps/fy_iceworld.bsp',
+            'build/source-assets/cstrike/maps/cs_assault.bsp',
+            'build/source-assets/cstrike/maps/cs_italy.bsp',
             'build/source-assets/cstrike/models/v_ak47.mdl',
-            'build/source-assets/cstrike/sound/weapons/ak47-1.wav'
+            'build/source-assets/cstrike/models/v_awp.mdl',
+            'build/source-assets/cstrike/models/v_m249.mdl',
+            'build/source-assets/cstrike/sound/weapons/ak47-1.wav',
+            'build/source-assets/valve/halflife.wad'
           )) {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
               throw "Original asset archive is incomplete: $required"
@@ -83,7 +86,7 @@ jobs:
         run: |
           .\tools\build-resource-pack.ps1 `
             -Cstrike 'build/source-assets/cstrike' `
-            -AllowMissing
+            -Valve 'build/source-assets/valve'
 
       - name: Build BDA
         shell: pwsh
@@ -114,8 +117,9 @@ jobs:
 
           This workflow downloads the authorized original cstrike archive
           from $($env:CS15_SOURCE_RELEASE), verifies its SHA-256, preprocesses
-          maps/models/textures/animation/audio, and publishes the matching
-          CS15.C15PAK with the BDA and ready-to-copy 9588 install ZIP.
+          maps/models/textures/animation/audio, rejects missing WAD textures,
+          and publishes the matching CS15.C15PAK with the BDA and
+          ready-to-copy 9588 install ZIP.
 
           Do not make the repository or these release assets public.
           "@

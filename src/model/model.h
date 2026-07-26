@@ -45,7 +45,7 @@ typedef struct c15_model_animation_sequence {
 } c15_model_animation_sequence_t;
 
 typedef struct c15_model_animation {
-    const c15_pak_entry_t *entry;
+    c15_pak_entry_t entry;
     uint32_t vertex_count;
     uint32_t frame_stride;
     uint32_t sequence_count;

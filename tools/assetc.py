@@ -18,14 +18,14 @@ from typing import Iterable, Sequence
 
 
 PAK_MAGIC = b"C15PAK1\0"
-PAK_VERSION = 1
+PAK_VERSION = 2
 PAK_ENDIAN = 0x12345678
 PAK_HEADER = struct.Struct("<8sIIIIII32s")
 PAK_ENTRY = struct.Struct("<4sIIIIII32sI")
 PAK_ALIGNMENT = 4096
 
 BSP_MAGIC = b"C15BSP1\0"
-BSP_VERSION = 1
+BSP_VERSION = 2
 BSP_HEADER = struct.Struct("<8sIIIII6h24s")
 BSP_SECTION = struct.Struct("<4sIIIHHI8s")
 BSP_SECTION_ALIGNMENT = 16
@@ -45,11 +45,44 @@ MDL_TRIANGLE = struct.Struct("<3HBB")
 SURFACE_VERTEX = struct.Struct("<5h")
 SURFACE = struct.Struct("<IHHHHBBH")
 PLANE = struct.Struct("<3hiBBH2x")
-NODE = struct.Struct("<I2h6h2H")
-LEAF = struct.Struct("<ii6h2H4B")
+NODE = struct.Struct("<I2h")
+LEAF = struct.Struct("<ii2H")
 CLIPNODE = struct.Struct("<i2h")
 MODEL = struct.Struct("<9h2x4i3i")
 SPAWN = struct.Struct("<3hhBB")
+BOMB_SITE = struct.Struct("<3h")
+
+SOUND_CUE_SOURCES = (
+    "weapons/knife_slash1.wav",
+    "weapons/glock18-1.wav",
+    "weapons/usp1.wav",
+    "weapons/p228-1.wav",
+    "weapons/deagle-1.wav",
+    "weapons/elite_fire.wav",
+    "weapons/fiveseven-1.wav",
+    "weapons/m3-1.wav",
+    "weapons/xm1014-1.wav",
+    "weapons/mac10-1.wav",
+    "weapons/tmp-1.wav",
+    "weapons/mp5-1.wav",
+    "weapons/ump45-1.wav",
+    "weapons/p90-1.wav",
+    "weapons/ak47-1.wav",
+    "weapons/sg552-1.wav",
+    "weapons/m4a1-1.wav",
+    "weapons/aug-1.wav",
+    "weapons/scout_fire-1.wav",
+    "weapons/awp1.wav",
+    "weapons/g3sg1-1.wav",
+    "weapons/sg550-1.wav",
+    "weapons/m249-1.wav",
+    "weapons/generic_reload.wav",
+    "weapons/c4_plant.wav",
+    "weapons/c4_beep1.wav",
+    "weapons/c4_explode1.wav",
+    "weapons/c4_disarm.wav",
+    "weapons/c4_disarmed.wav",
+)
 
 STUDIO_HEADER_SIZE = 244
 STUDIO_BONE_SIZE = 112
@@ -271,7 +304,7 @@ def compile_texture(texture: MipTexture) -> tuple[bytes, dict[str, object]]:
     if texture.blob is None:
         raise AssetError(f"texture {texture.name} has no pixel data")
     level = 0
-    while level < 3 and max(texture.width >> level, texture.height >> level) > 64:
+    while level < 3 and max(texture.width >> level, texture.height >> level) > 32:
         level += 1
     width = max(1, texture.width >> level)
     height = max(1, texture.height >> level)
@@ -279,7 +312,7 @@ def compile_texture(texture: MipTexture) -> tuple[bytes, dict[str, object]]:
     pixel_bytes = width * height
     if pixel_offset <= 0 or pixel_offset > len(texture.blob) - pixel_bytes:
         raise AssetError(f"texture {texture.name} mip {level} is truncated")
-    pixels = texture.blob[pixel_offset : pixel_offset + pixel_bytes]
+    source_pixels = texture.blob[pixel_offset : pixel_offset + pixel_bytes]
 
     mip3_width = max(1, texture.width >> 3)
     mip3_height = max(1, texture.height >> 3)
@@ -295,17 +328,44 @@ def compile_texture(texture: MipTexture) -> tuple[bytes, dict[str, object]]:
     if palette_offset + 256 * 3 > len(texture.blob):
         raise AssetError(f"texture {texture.name} palette is truncated")
     palette_source = texture.blob[palette_offset : palette_offset + 256 * 3]
-    palette = bytearray()
+    flags = 1 if texture.name.startswith("{") else 0
+    histogram = Counter(source_pixels)
+    sums = [[0, 0, 0, 0] for _ in range(64)]
+    remap = bytearray(256)
     for index in range(256):
         red, green, blue = palette_source[index * 3 : index * 3 + 3]
+        target = ((red >> 6) << 4) | ((green >> 6) << 2) | (blue >> 6)
+        if flags and index == 255:
+            target = 63
+        elif flags and target == 63:
+            target = 62
+        remap[index] = target
+        weight = histogram.get(index, 0)
+        if weight:
+            sums[target][0] += red * weight
+            sums[target][1] += green * weight
+            sums[target][2] += blue * weight
+            sums[target][3] += weight
+    palette = bytearray()
+    for index, (red, green, blue, weight) in enumerate(sums):
+        if flags and index == 63:
+            red, green, blue = 0, 0, 255
+        elif weight:
+            red //= weight
+            green //= weight
+            blue //= weight
+        else:
+            red = ((index >> 4) & 3) * 85
+            green = ((index >> 2) & 3) * 85
+            blue = (index & 3) * 85
         palette += struct.pack("<H", rgb565(red, green, blue))
-    flags = 1 if texture.name.startswith("{") else 0
+    pixels = bytes(remap[index] for index in source_pixels)
     header = TEX_HEADER.pack(
         b"CTX1",
         width,
         height,
         flags,
-        256,
+        64,
         len(pixels),
         texture.width,
         texture.height,
@@ -727,13 +787,20 @@ def select_view_animation_sequences(
     if asset_base.endswith("/v_knife"):
         fire = first_named("slash1", "midslash1", "stab")
         reload_sequence = idle
+    elif asset_base.endswith("/v_c4"):
+        fire = first_named("pressbutton", "drop")
+        reload_sequence = idle
+    elif asset_base.endswith("/v_elite"):
+        fire = first_named("shoot_right1", "shoot_left1")
+        reload_sequence = first_named("reload")
     else:
         fire = first_named(
             "shoot1_unsil" if unsilenced else "",
             "shoot1", "shoot",
         )
         reload_sequence = first_named(
-            "reload_unsil" if unsilenced else "", "reload"
+            "reload_unsil" if unsilenced else "",
+            "reload", "start_reload", "insert"
         )
     draw = first_named(
         "draw_unsil" if unsilenced else "", "draw", "draw2"
@@ -1690,15 +1757,21 @@ def light_for_face(
     return max(24, min(255, total // sample_count))
 
 
-def compile_spawns(entity_blob: bytes) -> tuple[bytes, list[dict[str, int]]]:
+def parse_entities(entity_blob: bytes) -> list[dict[str, str]]:
     text = entity_blob.decode("latin1", errors="replace")
-    output = bytearray()
-    manifest: list[dict[str, int]] = []
-    for block in re.findall(r"\{([^}]*)\}", text, flags=re.DOTALL):
-        values = {
+    return [
+        {
             key: value
             for key, value in re.findall(r'"([^"]*)"\s*"([^"]*)"', block)
         }
+        for block in re.findall(r"\{([^}]*)\}", text, flags=re.DOTALL)
+    ]
+
+
+def compile_spawns(entity_blob: bytes) -> tuple[bytes, list[dict[str, int]]]:
+    output = bytearray()
+    manifest: list[dict[str, int]] = []
+    for values in parse_entities(entity_blob):
         classname = values.get("classname", "").lower()
         if classname == "info_player_deathmatch":
             team = 1
@@ -1720,6 +1793,46 @@ def compile_spawns(entity_blob: bytes) -> tuple[bytes, list[dict[str, int]]]:
         )
     if not manifest:
         raise AssetError("map contains no T/CT player spawns")
+    return bytes(output), manifest
+
+
+def compile_bomb_sites(
+    entity_blob: bytes, models: list[tuple]
+) -> tuple[bytes, list[dict[str, int]]]:
+    output = bytearray()
+    manifest: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for values in parse_entities(entity_blob):
+        if values.get("classname", "").lower() not in (
+            "func_bomb_target", "info_bomb_target"
+        ):
+            continue
+        origin_values = values.get("origin", "").split()
+        if len(origin_values) == 3:
+            origin = tuple(
+                checked_i16(float(value), "bomb-site origin")
+                for value in origin_values
+            )
+        else:
+            model_name = values.get("model", "")
+            if not re.fullmatch(r"\*[0-9]+", model_name):
+                continue
+            model_index = int(model_name[1:])
+            if model_index <= 0 or model_index >= len(models):
+                continue
+            model = models[model_index]
+            origin = tuple(
+                checked_i16(
+                    (float(model[axis]) + float(model[axis + 3])) * 0.5,
+                    "bomb-site brush center",
+                )
+                for axis in range(3)
+            )
+        if origin in seen:
+            continue
+        seen.add(origin)
+        output += BOMB_SITE.pack(*origin)
+        manifest.append({"x": origin[0], "y": origin[1], "z": origin[2]})
     return bytes(output), manifest
 
 
@@ -1847,10 +1960,10 @@ def compile_bsp(
 
     nodes_out = bytearray()
     for item in node_source:
-        nodes_out += NODE.pack(*item)
+        nodes_out += NODE.pack(item[0], item[1], item[2])
     leaves_out = bytearray()
     for item in leaf_source:
-        leaves_out += LEAF.pack(*item)
+        leaves_out += LEAF.pack(item[0], item[1], item[8], item[9])
     clips_out = bytearray()
     for item in clip_source:
         clips_out += CLIPNODE.pack(*item)
@@ -1861,6 +1974,9 @@ def compile_bsp(
         models_out += MODEL.pack(*bounds, *item[9:13], *item[13:16])
     texture_names = b"".join(fixed_name(texture.name, 16) for texture in textures)
     spawns_out, spawns_manifest = compile_spawns(bsp.lump(LUMP_ENTITIES))
+    bomb_sites_out, bomb_sites_manifest = compile_bomb_sites(
+        bsp.lump(LUMP_ENTITIES), model_source
+    )
 
     bounds_values: list[float] = []
     if model_source:
@@ -1881,11 +1997,18 @@ def compile_bsp(
         pack_section(b"NODE", bytes(nodes_out), len(node_source), NODE.size),
         pack_section(b"LEAF", bytes(leaves_out), len(leaf_source), LEAF.size),
         pack_section(b"MARK", marks_out, len(marksurfaces), 2),
-        pack_section(b"VISI", bsp.lump(LUMP_VISIBILITY), len(bsp.lump(LUMP_VISIBILITY)), 1),
+        pack_section(
+            b"VISI", bsp.lump(LUMP_VISIBILITY),
+            len(bsp.lump(LUMP_VISIBILITY)), 1, 1
+        ),
         pack_section(b"CLIP", bytes(clips_out), len(clip_source), CLIPNODE.size),
         pack_section(b"MODL", bytes(models_out), len(model_source), MODEL.size),
         pack_section(b"TNAM", texture_names, len(textures), 16),
         pack_section(b"SPWN", spawns_out, len(spawns_manifest), SPAWN.size),
+        pack_section(
+            b"BSIT", bomb_sites_out,
+            len(bomb_sites_manifest), BOMB_SITE.size
+        ),
     ]
     directory_size = len(sections) * BSP_SECTION.size
     cursor = align(BSP_HEADER.size + directory_size, BSP_SECTION_ALIGNMENT)
@@ -1935,6 +2058,7 @@ def compile_bsp(
         "max_surface_vertices": max_surface_vertices,
         "textures": len(textures),
         "spawns": spawns_manifest,
+        "bomb_sites": bomb_sites_manifest,
         "visibility_bytes": len(bsp.lump(LUMP_VISIBILITY)),
         "source_lighting_bytes": len(lighting),
         "chunk_bytes": len(output),
@@ -1942,25 +2066,27 @@ def compile_bsp(
 
 
 def validate_texture_chunk(data: bytes) -> dict[str, int]:
-    if len(data) < TEX_HEADER.size + 512:
+    if len(data) < TEX_HEADER.size + 128:
         raise AssetError("C15TEX chunk is truncated")
     magic, width, height, flags, colors, pixel_bytes, sw, sh, mip, _ = (
         TEX_HEADER.unpack_from(data)
     )
-    if magic != b"CTX1" or colors != 256:
+    if magic != b"CTX1" or colors not in (64, 256):
         raise AssetError("invalid C15TEX header")
     if width == 0 or height == 0 or width * height != pixel_bytes:
         raise AssetError("invalid C15TEX dimensions")
-    if len(data) != TEX_HEADER.size + 512 + pixel_bytes:
+    palette_bytes = colors * 2
+    if len(data) != TEX_HEADER.size + palette_bytes + pixel_bytes:
         raise AssetError("C15TEX size mismatch")
     return {
         "width": width,
         "height": height,
         "flags": flags,
+        "palette_colors": colors,
         "source_width": sw,
         "source_height": sh,
         "mip": mip,
-        "resident_bytes": 512 + pixel_bytes,
+        "resident_bytes": palette_bytes + pixel_bytes,
     }
 
 
@@ -2155,7 +2281,7 @@ def validate_bsp_chunk(data: bytes) -> dict[str, object]:
                 f"C15BSP sections overlap: {previous[2]} and {current[2]}"
             )
     required = {"VERT", "SURF", "PLAN", "NODE", "LEAF", "MARK",
-                "VISI", "CLIP", "MODL", "TNAM", "SPWN"}
+                "VISI", "CLIP", "MODL", "TNAM", "SPWN", "BSIT"}
     if required - sections.keys():
         raise AssetError(f"missing C15BSP sections: {sorted(required - sections.keys())}")
     return {
@@ -2190,14 +2316,16 @@ def build_pack(assets: Sequence[PakAsset]) -> bytes:
         normalized.add(asset.name)
         identifiers.add(identifier)
 
+    ordered_assets = sorted(assets, key=lambda asset: fnv1a(asset.name))
     directory_offset = PAK_HEADER.size
     data_offset = align(
-        directory_offset + len(assets) * PAK_ENTRY.size, PAK_ALIGNMENT
+        directory_offset + len(ordered_assets) * PAK_ENTRY.size,
+        PAK_ALIGNMENT,
     )
     cursor = data_offset
     entries: list[bytes] = []
     placements: list[tuple[int, bytes]] = []
-    for asset in assets:
+    for asset in ordered_assets:
         cursor = align(cursor, PAK_ALIGNMENT)
         entries.append(
             PAK_ENTRY.pack(
@@ -2220,7 +2348,7 @@ def build_pack(assets: Sequence[PakAsset]) -> bytes:
         PAK_VERSION,
         PAK_ENDIAN,
         len(output),
-        len(assets),
+        len(ordered_assets),
         directory_offset,
         data_offset,
         bytes(32),
@@ -2235,17 +2363,9 @@ def build_pack(assets: Sequence[PakAsset]) -> bytes:
 
 
 def compile_sound_bank(cstrike: Path) -> tuple[bytes, dict[str, object]]:
-    cue_sources = [
-        "weapons/knife_slash1.wav",
-        "weapons/glock18-1.wav",
-        "weapons/ak47-1.wav",
-        "weapons/m4a1-1.wav",
-        "weapons/usp1.wav",
-        "weapons/generic_reload.wav",
-    ]
     converted: list[bytes] = []
     cue_manifest: list[dict[str, object]] = []
-    for relative in cue_sources:
+    for relative in SOUND_CUE_SOURCES:
         path = cstrike / "sound" / relative
         if not path.is_file():
             raise AssetError(f"historical sound not found: {path}")
@@ -2306,7 +2426,7 @@ def validate_sound_chunk(data: bytes) -> dict[str, object]:
     if (
         magic != b"C15SND1\0"
         or sample_rate != 22050
-        or count != 6
+        or count != len(SOUND_CUE_SOURCES)
         or reserved != 0
         or len(data) < SOUND_HEADER.size + count * SOUND_CUE.size
     ):
@@ -2349,6 +2469,7 @@ def validate_pack(data: bytes, deep: bool = True) -> dict[str, object]:
     ranges: list[tuple[int, int, str]] = []
     ids: set[int] = set()
     names: set[str] = set()
+    previous_identifier = -1
     for index in range(count):
         item = PAK_ENTRY.unpack_from(data, directory + index * PAK_ENTRY.size)
         kind_raw, flags, identifier, offset, packed, unpacked, checksum, name_raw, _ = item
@@ -2356,6 +2477,8 @@ def validate_pack(data: bytes, deep: bool = True) -> dict[str, object]:
         name = read_c_string(name_raw)
         if identifier != fnv1a(name) or identifier in ids or name in names:
             raise AssetError(f"invalid or duplicate C15PAK identity: {name}")
+        if identifier <= previous_identifier:
+            raise AssetError("C15PAK directory is not sorted by asset ID")
         if offset % PAK_ALIGNMENT or offset < data_offset or offset > len(data) - packed:
             raise AssetError(f"C15PAK entry outside file: {name}")
         if packed != unpacked:
@@ -2390,6 +2513,7 @@ def validate_pack(data: bytes, deep: bool = True) -> dict[str, object]:
         )
         ids.add(identifier)
         names.add(name)
+        previous_identifier = identifier
         ranges.append((offset, offset + packed, name))
     ranges.sort()
     for previous, current in zip(ranges, ranges[1:]):
@@ -2436,12 +2560,12 @@ def parse_map_specification(
 def placeholder_texture(
     reference: MipTexture,
 ) -> tuple[bytes, dict[str, object]]:
-    # Special tool/sky surfaces do not sample a WAD texture in v1.
+    # Special tool/sky surfaces do not sample a WAD texture in M12.
     placeholder_pixels = bytes([0] * 16 * 16)
-    placeholder_palette = bytearray(512)
+    placeholder_palette = bytearray(128)
     struct.pack_into("<H", placeholder_palette, 0, rgb565(48, 80, 96))
     chunk = TEX_HEADER.pack(
-        b"CTX1", 16, 16, 0, 256, len(placeholder_pixels),
+        b"CTX1", 16, 16, 0, 64, len(placeholder_pixels),
         16, 16, 0, bytes(3)
     ) + bytes(placeholder_palette) + placeholder_pixels
     return chunk, {
@@ -2452,7 +2576,7 @@ def placeholder_texture(
         "width": 16,
         "height": 16,
         "selected_mip": 0,
-        "resident_bytes": 768,
+        "resident_bytes": len(placeholder_palette) + len(placeholder_pixels),
         "chunk_bytes": len(chunk),
         "transparent": False,
         "special": True,
@@ -2466,7 +2590,7 @@ def build_command(args: argparse.Namespace) -> None:
         wad_roots.append(args.valve.resolve())
     wad_index = WadIndex(wad_roots)
 
-    specifications = args.map or ["de_dust"]
+    specifications = args.map or ["de_dust2"]
     map_sources = [
         parse_map_specification(cstrike, specification)
         for specification in specifications
@@ -2562,7 +2686,8 @@ def build_command(args: argparse.Namespace) -> None:
             raise AssetError(f"view model not found: {model_path}")
         asset_base = f"mdl/{normalized}"
         model_chunk, model_textures, detail, animation = compile_studio_model(
-            model_path, asset_base, with_animation=True
+            model_path, asset_base, with_animation=True,
+            maximum_texture_dimension=32,
         )
         assets.append(PakAsset(b"MDL0", asset_base, model_chunk))
         if animation is None:
@@ -2571,7 +2696,10 @@ def build_command(args: argparse.Namespace) -> None:
             b"ANM0", asset_base.replace("mdl/", "anim/", 1),
             animation[0]
         ))
-        if normalized != "v_knife":
+        if normalized not in (
+            "v_knife", "v_c4", "v_hegrenade",
+            "v_flashbang", "v_smokegrenade"
+        ):
             muzzle_number = (
                 2 if normalized in ("v_ak47", "v_m4a1") else 1
             )
@@ -2662,7 +2790,7 @@ def build_command(args: argparse.Namespace) -> None:
         assets.append(PakAsset(b"SND0", "sound/game", sound_chunk))
         sound_manifest.append(sound_detail)
     assets.append(PakAsset(
-        b"VER0", "meta/m11", b"CS15LITE-M11-AUDIO-OPTIONS\0"
+        b"VER0", "meta/m12", b"CS15LITE-M12-MAPS-WEAPONS-C4-SCORE\0"
     ))
     pack = build_pack(assets)
     validation = validate_pack(pack)
@@ -2672,7 +2800,7 @@ def build_command(args: argparse.Namespace) -> None:
     manifest = {
         "format": "CS15 Lite asset manifest",
         "format_version": 1,
-        "runtime_resource_revision": "M11",
+        "runtime_resource_revision": "M12",
         "map": map_manifest[0],
         "maps": map_manifest,
         "textures": texture_manifest,
@@ -2759,7 +2887,7 @@ def parser() -> argparse.ArgumentParser:
         "--map",
         action="append",
         help="map name, repeatable; use NAME=PATH for an external BSP; "
-             "defaults to de_dust",
+             "defaults to de_dust2",
     )
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--manifest", type=Path)
@@ -2783,7 +2911,7 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--audio",
         action="store_true",
-        help="compile the six historical weapon/reload cues into sound/game",
+        help="compile the M12 historical weapon/objective cues into sound/game",
     )
     build.add_argument(
         "--allow-missing",

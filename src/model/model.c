@@ -45,7 +45,7 @@ int c15_model_load(
     uint32_t scratch_size
 )
 {
-    const c15_pak_entry_t *entry;
+    c15_pak_entry_t entry;
     uint8_t *chunk;
     uint32_t vertex_offset;
     uint32_t triangle_offset;
@@ -56,20 +56,20 @@ int c15_model_load(
         return 0;
     }
     bda_memset(model, 0, sizeof(*model));
-    entry = c15_pak_find(pak, name);
-    if (!entry || entry->type != C15_FOURCC('M','D','L','0') ||
-        entry->packed_size < MODEL_HEADER_BYTES ||
-        !c15_pak_validate_entry(pak, entry, scratch, scratch_size)) {
+    if (!c15_pak_find(pak, name, &entry) ||
+        entry.type != C15_FOURCC('M','D','L','0') ||
+        entry.packed_size < MODEL_HEADER_BYTES ||
+        !c15_pak_validate_entry(pak, &entry, scratch, scratch_size)) {
         return 0;
     }
     chunk = (uint8_t *)lite_arena_alloc(
-        arena, entry->packed_size, 16u
+        arena, entry.packed_size, 16u
     );
     if (!chunk ||
-        !c15_pak_read(pak, entry, 0u, chunk, entry->packed_size) ||
+        !c15_pak_read(pak, &entry, 0u, chunk, entry.packed_size) ||
         !bytes_equal(chunk, "C15MDL1\0", 8u) ||
         read_u32(chunk + 8) != 1u ||
-        read_u32(chunk + 12) != entry->packed_size) {
+        read_u32(chunk + 12) != entry.packed_size) {
         return 0;
     }
     model->chunk = chunk;
@@ -84,14 +84,14 @@ int c15_model_load(
         model->texture_count == 0u ||
         model->texture_count > C15_MODEL_MAX_TEXTURES ||
         model->vertex_count >
-            entry->packed_size / MODEL_VERTEX_BYTES ||
+            entry.packed_size / MODEL_VERTEX_BYTES ||
         model->triangle_count >
-            entry->packed_size / MODEL_TRIANGLE_BYTES ||
-        vertex_offset > entry->packed_size -
+            entry.packed_size / MODEL_TRIANGLE_BYTES ||
+        vertex_offset > entry.packed_size -
             model->vertex_count * MODEL_VERTEX_BYTES ||
-        triangle_offset > entry->packed_size -
+        triangle_offset > entry.packed_size -
             model->triangle_count * MODEL_TRIANGLE_BYTES ||
-        reference_offset > entry->packed_size -
+        reference_offset > entry.packed_size -
             model->texture_count * 4u) {
         return 0;
     }
@@ -100,16 +100,15 @@ int c15_model_load(
     for (index = 0u; index < model->texture_count; ++index) {
         c15_model_texture_t *texture = &model->textures[index];
         uint32_t identifier = read_u32(chunk + reference_offset + index * 4u);
-        const c15_pak_entry_t *texture_entry =
-            c15_pak_find_id(pak, identifier);
+        c15_pak_entry_t texture_entry;
         uint8_t header[TEX_HEADER_BYTES];
         uint32_t pixel_bytes;
         uint32_t resident;
         uint8_t *storage;
-        if (!texture_entry ||
-            texture_entry->type != C15_FOURCC('T','E','X','0') ||
+        if (!c15_pak_find_id(pak, identifier, &texture_entry) ||
+            texture_entry.type != C15_FOURCC('T','E','X','0') ||
             !c15_pak_read(
-                pak, texture_entry, 0u, header, sizeof(header)) ||
+                pak, &texture_entry, 0u, header, sizeof(header)) ||
             !bytes_equal(header, "CTX1", 4u)) {
             return 0;
         }
@@ -122,13 +121,13 @@ int c15_model_load(
             read_u16(header + 10) != 256u ||
             pixel_bytes !=
                 (uint32_t)texture->width * texture->height ||
-            texture_entry->packed_size != TEX_HEADER_BYTES + resident) {
+            texture_entry.packed_size != TEX_HEADER_BYTES + resident) {
             return 0;
         }
         storage = (uint8_t *)lite_arena_alloc(arena, resident, 16u);
         if (!storage ||
             !c15_pak_read(
-                pak, texture_entry, TEX_HEADER_BYTES,
+                pak, &texture_entry, TEX_HEADER_BYTES,
                 storage, resident)) {
             return 0;
         }
@@ -173,7 +172,7 @@ static int model_animation_open_profile(
     uint32_t expected_count
 )
 {
-    const c15_pak_entry_t *entry;
+    c15_pak_entry_t entry;
     uint8_t *header = (uint8_t *)scratch;
     uint32_t sequence_count;
     uint32_t table_bytes;
@@ -187,15 +186,15 @@ static int model_animation_open_profile(
         return 0;
     }
     bda_memset(animation, 0, sizeof(*animation));
-    entry = c15_pak_find(pak, name);
-    if (!entry || entry->type != C15_FOURCC('A','N','M','0') ||
-        entry->packed_size < ANIMATION_HEADER_BYTES ||
-        !c15_pak_validate_entry(pak, entry, scratch, scratch_size) ||
+    if (!c15_pak_find(pak, name, &entry) ||
+        entry.type != C15_FOURCC('A','N','M','0') ||
+        entry.packed_size < ANIMATION_HEADER_BYTES ||
+        !c15_pak_validate_entry(pak, &entry, scratch, scratch_size) ||
         !c15_pak_read(
-            pak, entry, 0u, header, ANIMATION_HEADER_BYTES) ||
+            pak, &entry, 0u, header, ANIMATION_HEADER_BYTES) ||
         !bytes_equal(header, "C15ANM1\0", 8u) ||
         read_u32(header + 8) != 1u ||
-        read_u32(header + 12) != entry->packed_size ||
+        read_u32(header + 12) != entry.packed_size ||
         read_u32(header + 16) != read_u32(model->chunk + 16) ||
         read_u32(header + 20) != model->vertex_count) {
         return 0;
@@ -208,8 +207,8 @@ static int model_animation_open_profile(
         frame_stride !=
             model->vertex_count * ANIMATION_POSITION_BYTES ||
         table_bytes > scratch_size ||
-        table_bytes > entry->packed_size ||
-        !c15_pak_read(pak, entry, 0u, header, table_bytes)) {
+        table_bytes > entry.packed_size ||
+        !c15_pak_read(pak, &entry, 0u, header, table_bytes)) {
         return 0;
     }
     for (index = 0u; index < sequence_count; ++index) {
@@ -229,7 +228,7 @@ static int model_animation_open_profile(
         }
         frame_bytes = frame_count * frame_stride;
         if (frame_offset < table_bytes ||
-            frame_offset > entry->packed_size - frame_bytes) {
+            frame_offset > entry.packed_size - frame_bytes) {
             return 0;
         }
         animation->sequences[action].frame_offset = frame_offset;
@@ -326,7 +325,7 @@ int c15_model_animation_apply(
         }
         bytes = count * ANIMATION_POSITION_BYTES;
         if (!c15_pak_read(
-                pak, animation->entry, source_offset,
+                pak, &animation->entry, source_offset,
                 input, bytes)) {
             return 0;
         }

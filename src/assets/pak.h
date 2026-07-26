@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define C15_PAK_MAX_ENTRIES 115u
+#define C15_PAK_MAX_ENTRIES 4096u
 #define C15_FOURCC(a,b,c,d) \
     ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8) | \
      ((uint32_t)(uint8_t)(c) << 16) | ((uint32_t)(uint8_t)(d) << 24))
@@ -25,16 +25,21 @@ typedef struct c15_pak {
     int file;
     uint32_t file_size;
     uint32_t entry_count;
-    c15_pak_entry_t entries[C15_PAK_MAX_ENTRIES];
+    uint32_t directory_offset;
+    uint32_t data_offset;
 } c15_pak_t;
 
 int c15_pak_open(c15_pak_t *pak, const char *path);
 void c15_pak_close(c15_pak_t *pak);
-const c15_pak_entry_t *c15_pak_find(
-    const c15_pak_t *pak, const char *name
+int c15_pak_find(
+    const c15_pak_t *pak,
+    const char *name,
+    c15_pak_entry_t *entry
 );
-const c15_pak_entry_t *c15_pak_find_id(
-    const c15_pak_t *pak, uint32_t asset_id
+int c15_pak_find_id(
+    const c15_pak_t *pak,
+    uint32_t asset_id,
+    c15_pak_entry_t *entry
 );
 int c15_pak_read(
     const c15_pak_t *pak,

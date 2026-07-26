@@ -3,7 +3,7 @@
 All multibyte fields are little-endian. Every file and chunk has an explicit
 version and is validated before the target runtime uses offsets from it.
 
-## `C15PAK` version 1
+## `C15PAK` version 2
 
 The package joins the converted map and its textures into one file so the
 9588 FAT layer can read large contiguous ranges instead of opening hundreds
@@ -13,7 +13,7 @@ The 64-byte header is:
 
 ```text
 char     magic[8]        "C15PAK1\0"
-uint32   version         1
+uint32   version         2
 uint32   endian          0x12345678
 uint32   file_size
 uint32   entry_count
@@ -36,12 +36,14 @@ char     name[32]        lower-case ASCII
 uint32   reserved
 ```
 
-Version 1 stores chunks uncompressed. Compression can be introduced per entry
-without changing the directory. The target must reject overlapping chunks,
-out-of-file offsets, duplicate asset IDs, bad CRCs, unsupported compression,
-or a file-size mismatch.
+Version 2 stores chunks uncompressed and requires directory entries to be
+strictly sorted by `asset_id`. The 9588 keeps only the 20-byte package handle
+and binary-searches the on-disk directory, instead of retaining all 565 M12
+records in RAM. The target rejects unsorted/duplicate IDs, overlapping chunks,
+out-of-file offsets, bad CRCs, unsupported compression, or a file-size
+mismatch.
 
-## `C15BSP` version 1
+## `C15BSP` version 2
 
 The map chunk contains a 64-byte header followed by a 32-byte section table.
 Sections are independently aligned to 16 bytes and carry CRC-32 values.
@@ -50,7 +52,7 @@ Header:
 
 ```text
 char     magic[8]        "C15BSP1\0"
-uint32   version         1
+uint32   version         2
 uint32   section_count
 uint32   file_size
 uint32   source_crc32
@@ -72,21 +74,22 @@ uint32   crc32
 uint8    reserved[8]
 ```
 
-Version 1 sections:
+Version 2 sections:
 
 | Type | Element | Purpose |
 |---|---|---|
 | `VERT` | 10 bytes | Per-surface `x,y,z,u,v` signed 16-bit values; UV is Q12.4 |
 | `SURF` | 16 bytes | Vertex range, texture, plane, flags, average light |
 | `PLAN` | 16 bytes | Q1.14 normal, Q28.4 distance, type and sign bits |
-| `NODE` | 24 bytes | BSP plane, children, bounds and surface range |
-| `LEAF` | 28 bytes | Contents, PVS offset, bounds and marksurface range |
+| `NODE` | 8 bytes | BSP plane and two signed child indices |
+| `LEAF` | 12 bytes | Contents, PVS offset and marksurface range |
 | `MARK` | 2 bytes | Surface index referenced by a leaf |
-| `VISI` | byte stream | Original GoldSrc compressed PVS |
+| `VISI` | byte stream | Original GoldSrc compressed PVS; section flag 1 means streamed |
 | `CLIP` | 8 bytes | Collision plane and two children |
 | `MODL` | 48 bytes | Bounds, origin, hull heads and surface range |
 | `TNAM` | 16 bytes | Texture name in GoldSrc miptex order |
 | `SPWN` | 10 bytes | Player origin, yaw, and T/CT team identifier |
+| `BSIT` | 6 bytes | Bomb-site center XYZ extracted from BSP entities |
 
 World positions are rounded to 1 GoldSrc map unit. This supports the historical
 CS maps while avoiding target floating-point transforms. Texture coordinates
@@ -112,6 +115,11 @@ come from BSP texinfo flags.
 `SPWN` uses three signed 16-bit map coordinates, signed 16-bit yaw degrees,
 an 8-bit team (`1` T, `2` CT), and one reserved byte.
 
+`BSIT` uses three signed 16-bit map coordinates. A `func_bomb_target` without
+an explicit origin uses the center of its referenced brush model. Version 2
+removes node/leaf bounds that the runtime did not consume and streams only the
+compressed PVS row needed after a camera-leaf change.
+
 ## `C15TEX` version 1
 
 Each texture remains indexed in target memory:
@@ -120,20 +128,23 @@ Each texture remains indexed in target memory:
 char     magic[4]        "CTX1"
 uint16   width
 uint16   height
-uint16   flags           bit 0: index 255 transparent
-uint16   palette_count   256
+uint16   flags           bit 0: last palette index is transparent
+uint16   palette_count   64 or 256
 uint32   pixel_bytes     width * height
 uint16   source_width
 uint16   source_height
 uint8    selected_mip
 uint8    reserved[3]
-uint16   palette[256]    preconverted RGB565
+uint16   palette[]       preconverted RGB565
 uint8    pixels[]
 ```
 
-The asset compiler selects the first authored GoldSrc mip whose largest
-dimension is at most 64. Runtime memory is therefore `width*height + 512`
-bytes, with no RGBA expansion and no runtime resampling.
+World textures select the first authored GoldSrc mip whose largest dimension
+is at most 32 and are quantized offline to a 64-color RGB565 palette. Model
+texture limits are selected per asset (16 for player skins, 32 for view
+models, at most 64 for held models) and retain 256 colors. Runtime memory is
+therefore `width*height + palette_count*2`, with no RGBA expansion or runtime
+resampling.
 
 ## `C15MDL` version 1
 
@@ -248,14 +259,15 @@ int16    anchors[][3]    StudioMDL muzzle positions in Q12.4
 uint8    pixels[]        two 4-bit indices per byte, low nibble first
 ```
 
-There is one weapon-specific `MSP0` entry for Glock, USP, AK-47 and M4A1.
-Although pistol/rifle pairs share the source sprite art, their baked
-StudioMDL attachment tracks differ. At runtime the current attachment is
-projected with the same view-model placement, recoil and bob as the weapon.
+There is one weapon-specific `MSP0` entry for every firearm in the 23-item
+M12 weapon table (Knife has no muzzle flash). Although weapons share the
+historical sprite art, their baked StudioMDL attachment tracks differ. At
+runtime the current attachment is projected with the same view-model
+placement, recoil and bob as the weapon.
 
 ## `SND0` streamed sound bank
 
-The six historical 22050 Hz mono WAV cues are converted offline to signed
+The 29 historical 22050 Hz mono WAV cues are converted offline to signed
 16-bit PCM and concatenated into one `sound/game` entry. No decoded sound or
 ring buffer is resident on the target; 1024-byte blocks are read through the
 shared 2 KiB scratch buffer and written to the firmware PCM queue.
@@ -263,7 +275,7 @@ shared 2 KiB scratch buffer and written to the firmware PCM queue.
 ```text
 char     magic[8]        "C15SND1\0"
 uint32   sample_rate     22050
-uint16   cue_count       6
+uint16   cue_count       29
 uint16   reserved        0
 ```
 
@@ -274,6 +286,7 @@ uint32   offset
 uint32   pcm_bytes       even; signed 16-bit mono samples
 ```
 
-Cues 0-4 correspond to Knife, Glock, AK-47, M4A1 and USP fire; cue 5 is the
-generic reload sound. Player and bot playback use two logical streamed voices
-mixed with saturation into each firmware block.
+Cues 0-22 follow the runtime weapon enum (Knife through M249), cue 23 is the
+generic reload sound, and cues 24-28 are C4 plant, beep, explosion, disarm and
+disarmed. Player and Bot playback use two logical streamed voices mixed with
+saturation into each firmware block.

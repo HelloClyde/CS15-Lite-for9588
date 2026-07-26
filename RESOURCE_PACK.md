@@ -6,17 +6,20 @@ repository members who are authorized to use the source resources. Do not
 redistribute the pack or expose it through a public release. You can also build
 it locally from resources you are authorized to use.
 
-The private `v0.1.1` release also stores
-`CS15-original-cstrike-assets.zip`. It contains the `cstrike` directory used
-by CI, including `maps/fy_iceworld.bsp`, plus a SHA-256 sidecar. Tag builds
-download and verify this archive before preprocessing any assets.
+The source archive consumed by final M12 tag builds must include its SHA-256
+sidecar and use this layout:
+
+```text
+cstrike\...
+valve\halflife.wad
+```
 
 ## Required sources
 
-- a Counter-Strike 1.5 `cstrike` directory;
-- an authorized `fy_iceworld.bsp` under `cstrike\maps`;
-- optionally, the matching Half-Life `valve` directory for every WAD texture
-  referenced by `de_dust`.
+- a Counter-Strike 1.5 `cstrike` directory containing `de_dust2.bsp`,
+  `cs_assault.bsp`, `cs_italy.bsp`, the 23 selected `v_*.mdl` files and their
+  weapon sounds;
+- the matching Half-Life `valve` directory containing `halflife.wad`.
 
 The converter reads the inputs but never modifies them.
 
@@ -26,17 +29,17 @@ From the repository root:
 
 ```powershell
 $cstrike = 'D:\Games\Counter-Strike-1.5\cstrike'
+$valve = 'D:\Games\Half-Life\valve'
 .\tools\build-resource-pack.ps1 `
   -Cstrike $cstrike `
-  -AllowMissing
+  -Valve $valve
 ```
 
-The archived historical `cstrike` tree lacks three Half-Life WAD textures, so
-CI intentionally uses `-AllowMissing`. This produces the same three marked
-16x16 placeholders as the current M11 pack and keeps the output deterministic.
-If you have the matching `valve` WAD directory and want to replace those
-placeholders, invoke `assetc.py` directly with `--valve` and omit
-`--allow-missing`; the resulting pack hash will differ.
+If `valve` is next to `cstrike`, the PowerShell wrapper discovers it
+automatically. `cs_assault` uses many Half-Life base textures, so a final M12
+pack must include `halflife.wad`. `-AllowMissing` remains available only for
+converter development; it emits visible 16x16 placeholders and must not be
+used for a release acceptance build.
 
 ## Validate
 

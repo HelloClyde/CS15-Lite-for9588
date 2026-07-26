@@ -5,9 +5,9 @@
 
 #define BSP_HEADER_BYTES 64u
 #define BSP_SECTION_BYTES 32u
-#define BSP_VERSION 1u
+#define BSP_VERSION 2u
 #define TEX_HEADER_BYTES 24u
-#define TEX_PALETTE_BYTES 512u
+#define BSP_SECTION_STREAMED 1u
 
 static uint16_t read_u16(const uint8_t *data)
 {
@@ -69,17 +69,6 @@ static int is_power_of_two(uint16_t value)
     return value != 0u && (value & (uint16_t)(value - 1u)) == 0u;
 }
 
-static uint16_t shade565(uint16_t color, uint8_t light)
-{
-    uint32_t red = (color >> 11) & 31u;
-    uint32_t green = (color >> 5) & 63u;
-    uint32_t blue = color & 31u;
-    red = (red * light) >> 8;
-    green = (green * light) >> 8;
-    blue = (blue * light) >> 8;
-    return (uint16_t)((red << 11) | (green << 5) | blue);
-}
-
 const c15_map_section_t *c15_map_section(
     const c15_map_t *map, uint32_t type
 )
@@ -107,16 +96,17 @@ static int load_sections(
     uint8_t record[BSP_SECTION_BYTES];
     uint32_t count;
     uint32_t index;
-    if (!c15_pak_read(map->pak, map->entry, 0u, header, sizeof(header)) ||
+    if (!c15_pak_read(
+            map->pak, &map->entry, 0u, header, sizeof(header)) ||
         !bytes_equal(header, "C15BSP1\0", 8u) ||
         read_u32(header + 8) != BSP_VERSION ||
-        read_u32(header + 16) != map->entry->packed_size) {
+        read_u32(header + 16) != map->entry.packed_size) {
         return 0;
     }
     count = read_u32(header + 12);
     if (count == 0u || count > C15_MAP_MAX_SECTIONS ||
         BSP_HEADER_BYTES + count * BSP_SECTION_BYTES >
-            map->entry->packed_size) {
+            map->entry.packed_size) {
         return 0;
     }
     map->source_crc32 = read_u32(header + 20);
@@ -127,34 +117,43 @@ static int load_sections(
         uint32_t checksum;
         uint8_t *destination;
         if (!c15_pak_read(
-                map->pak, map->entry,
+                map->pak, &map->entry,
                 BSP_HEADER_BYTES + index * BSP_SECTION_BYTES,
                 record, sizeof(record))) {
             return 0;
         }
         section->type = read_u32(record);
         offset = read_u32(record + 4);
+        section->offset = offset;
         section->size = read_u32(record + 8);
         section->count = read_u32(record + 12);
         section->stride = read_u16(record + 16);
         section->flags = read_u16(record + 18);
         checksum = read_u32(record + 20);
         if ((offset & 15u) != 0u ||
-            offset > map->entry->packed_size - section->size ||
+            offset > map->entry.packed_size - section->size ||
             (section->stride != 0u &&
              section->count * section->stride != section->size)) {
             return 0;
         }
-        destination = (uint8_t *)lite_arena_alloc(
-            arena, section->size ? section->size : 1u, 16u
-        );
-        if (!destination ||
-            !c15_pak_read(
-                map->pak, map->entry, offset, destination, section->size) ||
-            c15_crc32(destination, section->size) != checksum) {
-            return 0;
+        if ((section->flags & BSP_SECTION_STREAMED) != 0u) {
+            if (section->type != C15_FOURCC('V','I','S','I')) {
+                return 0;
+            }
+            section->data = 0;
+        } else {
+            destination = (uint8_t *)lite_arena_alloc(
+                arena, section->size ? section->size : 1u, 16u
+            );
+            if (!destination ||
+                !c15_pak_read(
+                    map->pak, &map->entry, offset,
+                    destination, section->size) ||
+                c15_crc32(destination, section->size) != checksum) {
+                return 0;
+            }
+            section->data = destination;
         }
-        section->data = destination;
     }
     (void)scratch;
     (void)scratch_size;
@@ -190,10 +189,14 @@ static int cache_sections(c15_map_t *map)
     map->model_section = c15_map_section(
         map, C15_FOURCC('M','O','D','L')
     );
+    map->bomb_site_section = c15_map_section(
+        map, C15_FOURCC('B','S','I','T')
+    );
     return map->vertex_section && map->surface_section &&
         map->plane_section && map->node_section && map->leaf_section &&
         map->mark_section && map->visibility_section &&
-        map->clip_section && map->model_section;
+        map->clip_section && map->model_section &&
+        map->bomb_site_section;
 }
 
 static int load_textures(c15_map_t *map, lite_arena_t *arena)
@@ -212,46 +215,45 @@ static int load_textures(c15_map_t *map, lite_arena_t *arena)
         const uint8_t *source_name = names->data + index * 16u;
         char asset_name[32];
         uint8_t header[TEX_HEADER_BYTES];
-        const c15_pak_entry_t *entry;
+        c15_pak_entry_t entry;
         uint8_t *storage;
         uint32_t resident;
-        uint32_t storage_size;
-        uint32_t light_level;
+        uint32_t palette_bytes;
         uint32_t name_index;
         for (name_index = 0u; name_index < 16u; ++name_index) {
             texture->name[name_index] = (char)source_name[name_index];
         }
         texture->name[16] = 0;
         build_name(asset_name, "tex/", texture->name);
-        entry = c15_pak_find(map->pak, asset_name);
-        if (!entry || entry->type != C15_FOURCC('T','E','X','0') ||
-            !c15_pak_read(map->pak, entry, 0u, header, sizeof(header)) ||
+        if (!c15_pak_find(map->pak, asset_name, &entry) ||
+            entry.type != C15_FOURCC('T','E','X','0') ||
+            !c15_pak_read(
+                map->pak, &entry, 0u, header, sizeof(header)) ||
             !bytes_equal(header, "CTX1", 4u)) {
             return 0;
         }
         texture->width = read_u16(header + 4);
         texture->height = read_u16(header + 6);
         texture->flags = read_u16(header + 8);
-        resident = TEX_PALETTE_BYTES + read_u32(header + 12);
-        storage_size = resident +
-            C15_TEXTURE_LIGHT_LEVELS * TEX_PALETTE_BYTES;
+        texture->palette_count = read_u16(header + 10);
+        palette_bytes = (uint32_t)texture->palette_count * 2u;
+        resident = palette_bytes + read_u32(header + 12);
         if (texture->width == 0u || texture->height == 0u ||
-            read_u16(header + 10) != 256u ||
+            (texture->palette_count != 64u &&
+             texture->palette_count != 256u) ||
             read_u32(header + 12) !=
                 (uint32_t)texture->width * (uint32_t)texture->height ||
-            entry->packed_size != TEX_HEADER_BYTES + resident) {
+            entry.packed_size != TEX_HEADER_BYTES + resident) {
             return 0;
         }
-        storage = (uint8_t *)lite_arena_alloc(arena, storage_size, 16u);
+        storage = (uint8_t *)lite_arena_alloc(arena, resident, 16u);
         if (!storage ||
             !c15_pak_read(
-                map->pak, entry, TEX_HEADER_BYTES, storage, resident)) {
+                map->pak, &entry, TEX_HEADER_BYTES, storage, resident)) {
             return 0;
         }
         texture->palette = (const uint16_t *)storage;
-        texture->pixels = storage + TEX_PALETTE_BYTES;
-        texture->shaded_palettes =
-            (const uint16_t *)(storage + resident);
+        texture->pixels = storage + palette_bytes;
         texture->width_mask = is_power_of_two(texture->width) ?
             (uint16_t)(texture->width - 1u) : 0u;
         texture->height_mask = is_power_of_two(texture->height) ?
@@ -260,16 +262,6 @@ static int load_textures(c15_map_t *map, lite_arena_t *arena)
             (uint16_t)(65536u / texture->width);
         texture->height_reciprocal =
             (uint16_t)(65536u / texture->height);
-        for (light_level = 0u;
-             light_level < C15_TEXTURE_LIGHT_LEVELS; ++light_level) {
-            uint32_t texel;
-            uint8_t light = (uint8_t)(light_level * 64u + 63u);
-            uint16_t *palette = (uint16_t *)texture->shaded_palettes +
-                light_level * 256u;
-            for (texel = 0u; texel < 256u; ++texel) {
-                palette[texel] = shade565(texture->palette[texel], light);
-            }
-        }
         texture->special = (uint8_t)(
             starts_with(texture->name, "sky") ||
             starts_with(texture->name, "aaatrigger") ||
@@ -351,6 +343,36 @@ int c15_map_spawn(
     return *team == 1u || *team == 2u;
 }
 
+uint32_t c15_map_bomb_site_count(const c15_map_t *map)
+{
+    const c15_map_section_t *sites = map ? map->bomb_site_section : 0;
+    if (!sites || sites->stride != 6u) {
+        return 0u;
+    }
+    return sites->count;
+}
+
+int c15_map_bomb_site(
+    const c15_map_t *map,
+    uint32_t index,
+    int32_t *x,
+    int32_t *y,
+    int32_t *z
+)
+{
+    const c15_map_section_t *sites = map ? map->bomb_site_section : 0;
+    const uint8_t *site;
+    if (!sites || sites->stride != 6u || index >= sites->count ||
+        !x || !y || !z) {
+        return 0;
+    }
+    site = sites->data + index * sites->stride;
+    *x = read_i16(site);
+    *y = read_i16(site + 2);
+    *z = read_i16(site + 4);
+    return 1;
+}
+
 int c15_map_load(
     c15_map_t *map,
     const c15_pak_t *pak,
@@ -367,11 +389,10 @@ int c15_map_load(
     }
     bda_memset(map, 0, sizeof(*map));
     map->pak = pak;
-    map->entry = c15_pak_find(pak, map_name);
-    if (!map->entry ||
-        map->entry->type != C15_FOURCC('B','S','P','0') ||
+    if (!c15_pak_find(pak, map_name, &map->entry) ||
+        map->entry.type != C15_FOURCC('B','S','P','0') ||
         !c15_pak_validate_entry(
-            pak, map->entry, scratch, scratch_size) ||
+            pak, &map->entry, scratch, scratch_size) ||
         !load_sections(map, map_arena, scratch, scratch_size) ||
         !cache_sections(map) ||
         !load_textures(map, texture_arena) ||
@@ -449,7 +470,7 @@ int c15_map_camera_leaf(
     const c15_map_section_t *nodes = map ? map->node_section : 0;
     int32_t node_index = 0;
     uint32_t guard = 0u;
-    if (!nodes || nodes->stride != 24u) {
+    if (!nodes || nodes->stride != 8u) {
         return 0;
     }
     while (node_index >= 0 && guard++ <= nodes->count) {
@@ -491,8 +512,8 @@ static void mark_leaf_surfaces(
         return;
     }
     leaf = leaves->data + leaf_index * leaves->stride;
-    first = read_u16(leaf + 20);
-    count = read_u16(leaf + 22);
+    first = read_u16(leaf + 8);
+    count = read_u16(leaf + 10);
     if (first > marks->count || count > marks->count - first) {
         return;
     }
@@ -520,6 +541,9 @@ int c15_map_build_visible(
         map ? map->visibility_section : 0;
     const c15_map_section_t *models = map ? map->model_section : 0;
     uint8_t leaf_bits[256];
+    uint8_t encoded_visibility[512];
+    const uint8_t *visibility_data;
+    uint32_t visibility_size;
     uint32_t row_bytes;
     uint32_t visibility_leaves;
     int leaf_index;
@@ -528,7 +552,7 @@ int c15_map_build_visible(
     uint32_t output = 0u;
     uint32_t leaf;
     if (!surfaces || !leaves || !marks || !visibility || !models ||
-        leaves->stride != 28u || marks->stride != 2u ||
+        leaves->stride != 12u || marks->stride != 2u ||
         models->stride != 48u || models->count == 0u ||
         surface_bits_size < (surfaces->count + 7u) / 8u) {
         return 0;
@@ -554,18 +578,41 @@ int c15_map_build_visible(
             leaf_bits[output] = 0xffu;
         }
     } else {
-        input = (uint32_t)visibility_offset;
+        if (visibility->data) {
+            visibility_data = visibility->data;
+            visibility_size = visibility->size;
+            input = (uint32_t)visibility_offset;
+        } else {
+            uint32_t read_size;
+            if ((uint32_t)visibility_offset >= visibility->size) {
+                return 0;
+            }
+            read_size = visibility->size -
+                (uint32_t)visibility_offset;
+            if (read_size > sizeof(encoded_visibility)) {
+                read_size = sizeof(encoded_visibility);
+            }
+            if (!c15_pak_read(
+                    map->pak, &map->entry,
+                    visibility->offset + (uint32_t)visibility_offset,
+                    encoded_visibility, read_size)) {
+                return 0;
+            }
+            visibility_data = encoded_visibility;
+            visibility_size = read_size;
+            input = 0u;
+        }
         output = 0u;
-        while (output < row_bytes && input < visibility->size) {
-            uint8_t value = visibility->data[input++];
+        while (output < row_bytes && input < visibility_size) {
+            uint8_t value = visibility_data[input++];
             if (value != 0u) {
                 leaf_bits[output++] = value;
             } else {
                 uint32_t run;
-                if (input >= visibility->size) {
+                if (input >= visibility_size) {
                     return 0;
                 }
-                run = visibility->data[input++];
+                run = visibility_data[input++];
                 if (run == 0u) {
                     return 0;
                 }
@@ -622,7 +669,7 @@ int c15_map_hull_contents(
     }
     if (hull == 0u) {
         if (!nodes || !leaves ||
-            nodes->stride != 24u || leaves->stride != 28u) {
+            nodes->stride != 8u || leaves->stride != 12u) {
             return -2;
         }
         node_index = read_i32(models->data + 20u);

@@ -6,8 +6,13 @@
 
 #include "assets/pak.h"
 
-#define C15_SOUND_CUE_RELOAD 5u
-#define C15_SOUND_CUE_COUNT 6u
+#define C15_SOUND_CUE_RELOAD 23u
+#define C15_SOUND_CUE_BOMB_PLANT 24u
+#define C15_SOUND_CUE_BOMB_BEEP 25u
+#define C15_SOUND_CUE_BOMB_EXPLODE 26u
+#define C15_SOUND_CUE_BOMB_DISARM 27u
+#define C15_SOUND_CUE_BOMB_DISARMED 28u
+#define C15_SOUND_CUE_COUNT 29u
 #define C15_SOUND_CHANNEL_PLAYER 0u
 #define C15_SOUND_CHANNEL_BOT 1u
 
@@ -17,7 +22,7 @@ typedef struct c15_sound_voice {
 } c15_sound_voice_t;
 
 typedef struct c15_audio {
-    const c15_pak_entry_t *bank;
+    c15_pak_entry_t bank;
     uint32_t cue_offsets[C15_SOUND_CUE_COUNT];
     uint32_t cue_sizes[C15_SOUND_CUE_COUNT];
     c15_sound_voice_t voices[2];

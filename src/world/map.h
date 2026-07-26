@@ -9,14 +9,14 @@
 #include "core/memory.h"
 
 #define C15_MAP_MAX_SECTIONS 16u
-#define C15_MAP_MAX_TEXTURES 64u
-#define C15_MAP_VISIBLE_BYTES 704u
-#define C15_TEXTURE_LIGHT_LEVELS 4u
+#define C15_MAP_MAX_TEXTURES 192u
+#define C15_MAP_VISIBLE_BYTES 1088u
 
 typedef struct c15_map_section {
     uint32_t type;
     uint32_t size;
     uint32_t count;
+    uint32_t offset;
     uint16_t stride;
     uint16_t flags;
     const uint8_t *data;
@@ -26,8 +26,8 @@ typedef struct c15_texture {
     uint16_t width;
     uint16_t height;
     uint16_t flags;
+    uint16_t palette_count;
     const uint16_t *palette;
-    const uint16_t *shaded_palettes;
     const uint8_t *pixels;
     uint16_t width_mask;
     uint16_t height_mask;
@@ -76,7 +76,7 @@ typedef struct c15_plane {
 
 typedef struct c15_map {
     const c15_pak_t *pak;
-    const c15_pak_entry_t *entry;
+    c15_pak_entry_t entry;
     c15_map_section_t sections[C15_MAP_MAX_SECTIONS];
     uint32_t section_count;
     const c15_map_section_t *vertex_section;
@@ -88,6 +88,7 @@ typedef struct c15_map {
     const c15_map_section_t *visibility_section;
     const c15_map_section_t *clip_section;
     const c15_map_section_t *model_section;
+    const c15_map_section_t *bomb_site_section;
     c15_texture_t textures[C15_MAP_MAX_TEXTURES];
     uint32_t texture_count;
     c15_camera_t spawn;
@@ -139,6 +140,14 @@ int c15_map_spawn(
     uint32_t index,
     c15_camera_t *camera,
     uint8_t *team
+);
+uint32_t c15_map_bomb_site_count(const c15_map_t *map);
+int c15_map_bomb_site(
+    const c15_map_t *map,
+    uint32_t index,
+    int32_t *x,
+    int32_t *y,
+    int32_t *z
 );
 int16_t c15_sin_q14(uint8_t angle);
 int16_t c15_cos_q14(uint8_t angle);
