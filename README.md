@@ -19,9 +19,10 @@ StudioMDL、贴图、动画和音效离线转换成紧凑资源，再由一个�
 触摸拖动视角，实体确定键开火。
 
 > [!IMPORTANT]
-> 本仓库和 GitHub Release **不包含** Counter-Strike、Half-Life、Valve WAD、
-> BSP、MDL、WAV 或生成后的 `CS15.C15PAK`。你需要使用自己合法持有的资源在本地
-> 生成资源包。详见 [资源包指南](RESOURCE_PACK.md)。
+> 本仓库当前为私有仓库，私有 GitHub Release 提供与 BDA 配套的
+> `CS15.C15PAK`，仅供获得相关资源授权的仓库成员使用。不要将资源包公开、
+> 转发或随公开 fork 分发。源码仓库仍不跟踪原始 BSP、MDL、WAD、WAV；如需
+> 自行重建资源包，请参阅 [资源包指南](RESOURCE_PACK.md)。
 
 ## 游戏截图
 
@@ -40,14 +41,16 @@ StudioMDL、贴图、动画和音效离线转换成紧凑资源，再由一个�
 A:\应用\程序\CS15Lite.bda
 ```
 
-### 2. 生成资源包
+### 2. 安装资源包
 
-准备自己合法持有的 CS 1.5 `cstrike` 目录，然后按照
-[RESOURCE_PACK.md](RESOURCE_PACK.md) 运行转换器。输出文件必须放到：
+从同一个私有 Release 下载配套的 `CS15.C15PAK`，复制到：
 
 ```text
 A:\应用\数据\CS15LITE\CS15.C15PAK
 ```
+
+也可以按照 [RESOURCE_PACK.md](RESOURCE_PACK.md)，使用自己合法持有的
+CS 1.5 资源在本地重新生成。
 
 程序与资源包有版本标记；若二者不匹配，启动地图时会显示
 `RESOURCE PACK OUTDATED`，不会带着错误布局继续运行。
@@ -147,7 +150,8 @@ git push origin v0.1.0
 - 带真机安装目录结构的 runtime ZIP；
 - 资源转换器、格式文档和资源包指南组成的 resource-tools ZIP。
 
-出于版权原因，CI 不会上传由商业资源生成的 `CS15.C15PAK`。
+CI 不会从商业资源生成 `CS15.C15PAK`；私有 Release 中的配套资源包由仓库
+所有者手动维护，并附带独立 SHA-256。
 
 ## 目录
 
@@ -168,5 +172,8 @@ tests/               主机 C 测试与资源格式测试
 本项目是非官方爱好者工程，与 Valve、Counter-Strike、步步高无隶属或背书关系。
 Counter-Strike、Half-Life 及相关素材的权利归各自权利人所有；仓库中的游戏截图
 仅用于说明兼容性和开发状态。
+
+私有 Release 中的转换资源包仅供已获得对应游戏资源授权的成员使用，不得公开
+传播。若仓库重新转为公开，必须先移除该 Release 资源。
 
 源代码按 [GNU GPL v2 or later](LICENSE) 发布。`sdk` submodule 保留其自身许可证。

@@ -1,8 +1,10 @@
 # Building `CS15.C15PAK`
 
-`CS15.C15PAK` contains converted Counter-Strike/Half-Life data. It is not
-redistributable as part of this source repository or its public releases.
-Build it locally from resources you are authorized to use.
+`CS15.C15PAK` contains converted Counter-Strike/Half-Life data. The source
+repository never tracks it. A matching pack may be attached manually to a
+private release for repository members who are authorized to use the source
+resources. Do not redistribute the pack or expose it through a public release.
+You can also build it locally from resources you are authorized to use.
 
 ## Required sources
 
