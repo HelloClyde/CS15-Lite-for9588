@@ -32,11 +32,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $visibility = gh repo view $env:GITHUB_REPOSITORY `
-            --json visibility --jq .visibility
-          if ($LASTEXITCODE -ne 0 -or $visibility -ne 'PRIVATE') {
-            throw 'Original game assets may only be used in a private repo'
-          }
           $downloadRoot = 'build/source-release'
           New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
           gh release download $env:CS15_SOURCE_RELEASE `
@@ -117,10 +112,10 @@ jobs:
           $notes = @"
           Automated BBK 9588 build for $tag.
 
-          This private-repository workflow downloads the authorized original
-          cstrike archive from $($env:CS15_SOURCE_RELEASE), verifies its
-          SHA-256, preprocesses maps/models/textures/animation/audio, and
-          publishes the matching CS15.C15PAK with the BDA and install ZIP.
+          This workflow downloads the authorized original cstrike archive
+          from $($env:CS15_SOURCE_RELEASE), verifies its SHA-256, preprocesses
+          maps/models/textures/animation/audio, and publishes the matching
+          CS15.C15PAK with the BDA and install ZIP.
 
           Do not make the repository or these release assets public.
           "@

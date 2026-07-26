@@ -143,17 +143,17 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流首先检查仓库仍为私有，从固定的私有素材 Release 下载
-`CS15-original-cstrike-assets.zip` 并验证 SHA-256。随后离线预处理地图、模型、
-贴图、动画和音频，运行 C/Python 测试，构建 BDA，然后向 GitHub Release 上传：
+工作流从固定的素材 Release 下载 `CS15-original-cstrike-assets.zip` 并验证
+SHA-256。随后离线预处理地图、模型、贴图、动画和音频，运行 C/Python 测试，
+构建 BDA，然后向 GitHub Release 上传：
 
 - `CS15Lite.bda` 与 SHA-256；
 - CI 重新生成的 `CS15.C15PAK` 与 SHA-256；
 - 同时包含 BDA 和资源包真机目录结构的 runtime ZIP；
 - 资源转换器、格式文档和资源包指南组成的 resource-tools ZIP。
 
-原始素材归档固定保存在私有 `v0.1.1` Release，新的 tag 不会重复上传这份
-130 MB 归档。若仓库不是 private，素材下载步骤会主动失败。
+原始素材归档固定保存在 `v0.1.1` Release，新的 tag 不会重复上传这份
+130 MB 归档。
 
 ## 目录
 
