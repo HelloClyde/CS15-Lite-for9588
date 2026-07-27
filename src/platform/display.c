@@ -8,8 +8,34 @@
 #define TILE_SIZE 8u
 #define FRAME_PIXELS (DESTINATION_WIDTH * DESTINATION_HEIGHT)
 #define FRAME_WORDS (FRAME_PIXELS / 2u)
+#define MIPS_PHYS_LIMIT 0x20000000u
+#define MIPS_PHYS_MASK 0x1fffffffu
+#define MIPS_SEGMENT_MASK 0xe0000000u
+#define MIPS_KSEG0_BASE 0x80000000u
+#define MIPS_KSEG1_BASE 0xa0000000u
 
 typedef uint32_t lite_alias_u32 __attribute__((__may_alias__));
+
+int lite_display_resolve_mips_framebuffer(
+    uint32_t candidate,
+    uint32_t byte_length,
+    uint32_t *uncached_address
+)
+{
+    uint32_t segment = candidate & MIPS_SEGMENT_MASK;
+    uint32_t physical = candidate & MIPS_PHYS_MASK;
+
+    if (!uncached_address || byte_length == 0u ||
+        (candidate & 3u) != 0u ||
+        (segment != MIPS_KSEG0_BASE && segment != MIPS_KSEG1_BASE) ||
+        physical == 0u ||
+        byte_length > MIPS_PHYS_LIMIT ||
+        physical > MIPS_PHYS_LIMIT - byte_length) {
+        return 0;
+    }
+    *uncached_address = MIPS_KSEG1_BASE | physical;
+    return 1;
+}
 
 static void copy_ccw(
     const uint16_t *restrict source,

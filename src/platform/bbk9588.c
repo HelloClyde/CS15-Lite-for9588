@@ -17,18 +17,19 @@
 #define RAW_SCREEN_WIDTH 240u
 #define RAW_SCREEN_HEIGHT 320u
 #define C200_GUI_SCREEN_BUFFER 0x6b0u
-#define C200_GUI_SCREEN_ORIENTATION 0x738u
-#define C200_FRAMEBUFFER_PHYS 0x01f82000u
+#define C200_GUI_SCREEN_LAYOUT_HINT 0x738u
+#define FRAMEBUFFER_BYTES \
+    (RAW_SCREEN_WIDTH * RAW_SCREEN_HEIGHT * (uint32_t)sizeof(uint16_t))
 #define MIPS_PHYS_MASK 0x1fffffffu
-#define MIPS_SEGMENT_MASK 0xe0000000u
-#define MIPS_KSEG0_BASE 0x80000000u
-#define MIPS_KSEG1_BASE 0xa0000000u
 
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
 static bda_handle_t g_draw_owner;
 static volatile uint16_t *g_direct_framebuffer;
 static int g_direct_framebuffer_rotate_180;
+static uint32_t g_direct_framebuffer_layout_hint;
+static int g_direct_framebuffer_rejection_logged;
+static int g_direct_framebuffer_refresh_logged;
 static uint32_t g_previous_input;
 static uint32_t g_touch_control;
 static uint32_t g_touch_pressed_pending;
@@ -94,39 +95,58 @@ static uint32_t gui_call_u32_0(uint32_t offset, uint32_t fallback)
     return ((function_t)function)();
 }
 
-static int initialize_direct_framebuffer(void)
+static int refresh_direct_framebuffer(int initial)
 {
     void *candidate = gui_call_pointer0(C200_GUI_SCREEN_BUFFER);
     uint32_t address = (uint32_t)(uintptr_t)candidate;
-    uint32_t segment = address & MIPS_SEGMENT_MASK;
-    uint32_t physical = address & MIPS_PHYS_MASK;
-    uint32_t orientation = gui_call_u32_0(
-        C200_GUI_SCREEN_ORIENTATION, 0xffffffffu
+    uint32_t uncached_address;
+    uint32_t layout_hint = gui_call_u32_0(
+        C200_GUI_SCREEN_LAYOUT_HINT, 0xffffffffu
     );
+    int rotate_180 = layout_hint != 0x131u;
+    int changed;
 
-    g_direct_framebuffer = 0;
-    g_direct_framebuffer_rotate_180 = 0;
-    if ((segment != MIPS_KSEG0_BASE && segment != MIPS_KSEG1_BASE) ||
-        physical != C200_FRAMEBUFFER_PHYS ||
-        (orientation != 0x130u && orientation != 0x131u)) {
-        lite_log_line("video_submit=direct_framebuffer_rejected");
-        lite_log_hex32("framebuffer_candidate", address);
-        lite_log_hex32("framebuffer_physical", physical);
-        lite_log_hex32("framebuffer_orientation", orientation);
+    if (!lite_display_resolve_mips_framebuffer(
+            address, FRAMEBUFFER_BYTES, &uncached_address)) {
+        if (!g_direct_framebuffer_rejection_logged) {
+            lite_log_line("video_submit=direct_framebuffer_rejected");
+            lite_log_hex32("framebuffer_candidate", address);
+            lite_log_hex32("framebuffer_layout_hint", layout_hint);
+            g_direct_framebuffer_rejection_logged = 1;
+        }
         return 0;
     }
 
-    g_direct_framebuffer = (volatile uint16_t *)(uintptr_t)(
-        MIPS_KSEG1_BASE | physical
-    );
-    g_direct_framebuffer_rotate_180 = orientation != 0x131u;
+    changed =
+        (uint32_t)(uintptr_t)g_direct_framebuffer != uncached_address ||
+        g_direct_framebuffer_rotate_180 != rotate_180 ||
+        g_direct_framebuffer_layout_hint != layout_hint;
+    g_direct_framebuffer =
+        (volatile uint16_t *)(uintptr_t)uncached_address;
+    g_direct_framebuffer_rotate_180 = rotate_180;
+    g_direct_framebuffer_layout_hint = layout_hint;
+
+    if (!initial && changed && !g_direct_framebuffer_refresh_logged) {
+        lite_log_line("video_submit=direct_framebuffer_refreshed");
+        lite_log_hex32("framebuffer_pointer", uncached_address);
+        lite_log_hex32("framebuffer_layout_hint", layout_hint);
+        g_direct_framebuffer_refresh_logged = 1;
+    }
+    if (!initial) {
+        return 1;
+    }
+
     lite_log_line("video_submit=direct_framebuffer");
+    lite_log_line("framebuffer_address_policy=gui_dynamic");
     lite_log_hex32(
         "framebuffer_pointer",
         (uint32_t)(uintptr_t)g_direct_framebuffer
     );
-    lite_log_hex32("framebuffer_physical", physical);
-    lite_log_hex32("framebuffer_orientation", orientation);
+    lite_log_hex32(
+        "framebuffer_physical",
+        uncached_address & MIPS_PHYS_MASK
+    );
+    lite_log_hex32("framebuffer_layout_hint", layout_hint);
     lite_log_u32(
         "framebuffer_rotate_180",
         (uint32_t)g_direct_framebuffer_rotate_180
@@ -489,6 +509,9 @@ int lite_platform_open(void)
     g_draw_owner = 0;
     g_direct_framebuffer = 0;
     g_direct_framebuffer_rotate_180 = 0;
+    g_direct_framebuffer_layout_hint = 0xffffffffu;
+    g_direct_framebuffer_rejection_logged = 0;
+    g_direct_framebuffer_refresh_logged = 0;
     g_previous_input = 0u;
     g_touch_control = 0u;
     g_touch_pressed_pending = 0u;
@@ -524,7 +547,7 @@ int lite_platform_open(void)
     }
     (void)bda_gui_frame_activate(g_frame, 0x100u);
     (void)acquire_draw_context(g_frame);
-    if (!g_draw || !initialize_direct_framebuffer()) {
+    if (!g_draw || !refresh_direct_framebuffer(1)) {
         lite_platform_close();
         return 0;
     }
@@ -659,7 +682,7 @@ int lite_platform_touch_debug_take(lite_touch_debug_t *debug)
 
 int lite_platform_present(const uint16_t *rgb565)
 {
-    if (!rgb565 || !g_direct_framebuffer || g_detached) {
+    if (!rgb565 || g_detached || !refresh_direct_framebuffer(0)) {
         return 0;
     }
     lite_display_present_landscape_rgb565(

@@ -4,6 +4,17 @@
 
 #include <stdint.h>
 
+/*
+ * Validate a GUI-provided MIPS KSEG0/KSEG1 framebuffer pointer and return its
+ * uncached KSEG1 alias. The physical address is deliberately not fixed so
+ * firmware variants may place scanout memory elsewhere.
+ */
+int lite_display_resolve_mips_framebuffer(
+    uint32_t candidate,
+    uint32_t byte_length,
+    uint32_t *uncached_address
+);
+
 /* Rotate one logical 320x240 frame into a cached 240x320 staging buffer. */
 void lite_display_copy_landscape_rgb565(
     const uint16_t *source,

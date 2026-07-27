@@ -29,6 +29,48 @@ static void fill_source(void)
     }
 }
 
+static void verify_dynamic_framebuffer_address(void)
+{
+    uint32_t uncached = 0u;
+    const uint32_t frame_bytes =
+        DESTINATION_WIDTH * DESTINATION_HEIGHT * sizeof(uint16_t);
+
+    assert(lite_display_resolve_mips_framebuffer(
+        0x81f82000u, frame_bytes, &uncached
+    ));
+    assert(uncached == 0xa1f82000u);
+    assert(lite_display_resolve_mips_framebuffer(
+        0x83400000u, frame_bytes, &uncached
+    ));
+    assert(uncached == 0xa3400000u);
+    assert(lite_display_resolve_mips_framebuffer(
+        0xa2800000u, frame_bytes, &uncached
+    ));
+    assert(uncached == 0xa2800000u);
+
+    assert(!lite_display_resolve_mips_framebuffer(
+        0u, frame_bytes, &uncached
+    ));
+    assert(!lite_display_resolve_mips_framebuffer(
+        0x01f82000u, frame_bytes, &uncached
+    ));
+    assert(!lite_display_resolve_mips_framebuffer(
+        0xc1f82000u, frame_bytes, &uncached
+    ));
+    assert(!lite_display_resolve_mips_framebuffer(
+        0x81f82002u, frame_bytes, &uncached
+    ));
+    assert(!lite_display_resolve_mips_framebuffer(
+        0x9fff0000u, frame_bytes, &uncached
+    ));
+    assert(!lite_display_resolve_mips_framebuffer(
+        0x81f82000u, 0u, &uncached
+    ));
+    assert(!lite_display_resolve_mips_framebuffer(
+        0x81f82000u, frame_bytes, 0
+    ));
+}
+
 static void verify_ccw(void)
 {
     uint32_t y;
@@ -96,6 +138,7 @@ static void verify_direct_submit(void)
 
 int main(void)
 {
+    verify_dynamic_framebuffer_address();
     fill_source();
     verify_ccw();
     verify_ccw_rotated_180();
