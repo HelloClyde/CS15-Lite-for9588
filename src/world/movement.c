@@ -194,6 +194,7 @@ void c15_player_step_speed(
 {
     int32_t direction = 0;
     int32_t strafe = 0;
+    int on_ladder;
     if ((controls & C15_MOVE_FORWARD) != 0u) {
         direction += 1;
     }
@@ -208,6 +209,9 @@ void c15_player_step_speed(
     }
     update_crouch(
         player, map, (controls & C15_MOVE_CROUCH) != 0u
+    );
+    on_ladder = c15_map_on_ladder(
+        map, player->x, player->y, player->z
     );
     player->grounded = (uint8_t)player_grounded(player, map);
     if ((controls & C15_MOVE_JUMP) != 0u && player->grounded) {
@@ -228,7 +232,19 @@ void c15_player_step_speed(
         int32_t dy = (sine * forward - cosine * side) >> 14;
         (void)try_horizontal(player, map, dx, dy);
     }
-    step_vertical(player, map);
+    if (on_ladder) {
+        int32_t climb = direction * 4;
+        player->velocity_z_q8 = 0;
+        player->grounded = 0u;
+        if (climb != 0 &&
+            !position_blocked(
+                map, player->hull,
+                player->x, player->y, player->z + climb)) {
+            set_player_z(player, player->z + climb);
+        }
+    } else {
+        step_vertical(player, map);
+    }
     if (player->z > player->maximum_z) {
         player->maximum_z = player->z;
     }

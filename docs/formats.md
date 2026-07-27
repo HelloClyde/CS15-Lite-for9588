@@ -28,7 +28,7 @@ Each 64-byte directory entry is:
 char     type[4]         BSP0, TEX0, MDL0, SND0, ...
 uint32   flags
 uint32   asset_id        FNV-1a of normalized name
-uint32   data_ofs        4 KiB aligned
+uint32   data_ofs        512-byte aligned
 uint32   packed_size
 uint32   unpacked_size
 uint32   crc32
@@ -38,12 +38,12 @@ uint32   reserved
 
 Version 2 stores chunks uncompressed and requires directory entries to be
 strictly sorted by `asset_id`. The 9588 keeps only the 20-byte package handle
-and binary-searches the on-disk directory, instead of retaining all 565 M12
+and binary-searches the on-disk directory, instead of retaining all M15
 records in RAM. The target rejects unsorted/duplicate IDs, overlapping chunks,
 out-of-file offsets, bad CRCs, unsupported compression, or a file-size
 mismatch.
 
-## `C15BSP` version 2
+## `C15BSP` version 3
 
 The map chunk contains a 64-byte header followed by a 32-byte section table.
 Sections are independently aligned to 16 bytes and carry CRC-32 values.
@@ -52,7 +52,7 @@ Header:
 
 ```text
 char     magic[8]        "C15BSP1\0"
-uint32   version         2
+uint32   version         3
 uint32   section_count
 uint32   file_size
 uint32   source_crc32
@@ -74,7 +74,7 @@ uint32   crc32
 uint8    reserved[8]
 ```
 
-Version 2 sections:
+Version 3 sections:
 
 | Type | Element | Purpose |
 |---|---|---|
@@ -90,6 +90,11 @@ Version 2 sections:
 | `TNAM` | 16 bytes | Texture name in GoldSrc miptex order |
 | `SPWN` | 10 bytes | Player origin, yaw, and T/CT team identifier |
 | `BSIT` | 6 bytes | Bomb-site center XYZ extracted from BSP entities |
+| `HSTG` | 6 bytes | Hostage spawn XYZ |
+| `RSQZ` | 14 bytes | Hostage rescue AABB, team byte and reserved byte |
+| `BYZN` | 14 bytes | Buy-zone AABB, team byte and reserved byte |
+| `LADR` | 14 bytes | Ladder AABB, zero team and reserved byte |
+| `DENT` | 24 bytes | Door/button/breakable/platform kind, bounds, model and target hashes |
 
 World positions are rounded to 1 GoldSrc map unit. This supports the historical
 CS maps while avoiding target floating-point transforms. Texture coordinates
@@ -115,10 +120,13 @@ come from BSP texinfo flags.
 `SPWN` uses three signed 16-bit map coordinates, signed 16-bit yaw degrees,
 an 8-bit team (`1` T, `2` CT), and one reserved byte.
 
-`BSIT` uses three signed 16-bit map coordinates. A `func_bomb_target` without
-an explicit origin uses the center of its referenced brush model. Version 2
-removes node/leaf bounds that the runtime did not consume and streams only the
-compressed PVS row needed after a camera-leaf change.
+`BSIT` and `HSTG` use three signed 16-bit map coordinates. A brush entity
+without an explicit origin uses the bounds of its referenced BSP submodel.
+Zone records store six signed 16-bit bounds followed by team and reserved
+bytes. `DENT` stores kind/flags/model, the same six bounds, and 32-bit FNV-1a
+hashes for `target` and `targetname`. Version 3 retains the version-2 compact
+node/leaf layout and streams only the compressed PVS row needed after a
+camera-leaf change.
 
 ## `C15TEX` version 1
 
@@ -260,22 +268,23 @@ uint8    pixels[]        two 4-bit indices per byte, low nibble first
 ```
 
 There is one weapon-specific `MSP0` entry for every firearm in the 23-item
-M12 weapon table (Knife has no muzzle flash). Although weapons share the
+M15 weapon table (Knife has no muzzle flash). Although weapons share the
 historical sprite art, their baked StudioMDL attachment tracks differ. At
 runtime the current attachment is projected with the same view-model
 placement, recoil and bob as the weapon.
 
 ## `SND0` streamed sound bank
 
-The 29 historical 22050 Hz mono WAV cues are converted offline to signed
+The 43 historical mono WAV cues are converted offline to 11025 Hz signed
 16-bit PCM and concatenated into one `sound/game` entry. No decoded sound or
-ring buffer is resident on the target; 1024-byte blocks are read through the
-shared 2 KiB scratch buffer and written to the firmware PCM queue.
+ring buffer is resident on the target; 512-byte source blocks are read through
+the shared 2 KiB scratch buffer, duplicated to 22050 Hz, mixed, and written as
+1024-byte firmware PCM blocks.
 
 ```text
 char     magic[8]        "C15SND1\0"
-uint32   sample_rate     22050
-uint16   cue_count       29
+uint32   sample_rate     11025
+uint16   cue_count       43
 uint16   reserved        0
 ```
 
@@ -288,5 +297,8 @@ uint32   pcm_bytes       even; signed 16-bit mono samples
 
 Cues 0-22 follow the runtime weapon enum (Knife through M249), cue 23 is the
 generic reload sound, and cues 24-28 are C4 plant, beep, explosion, disarm and
-disarmed. Player and Bot playback use two logical streamed voices mixed with
-saturation into each firmware block.
+disarmed. Cues 29-42 provide footsteps, flesh/head hits, death, ricochet,
+grenade bounce and three detonation types, hostage response, team-win radio,
+armor and pain. Historical 22050 Hz cues are decimated to 11025 Hz offline;
+the target duplicates samples while mixing. Player and Bot playback use two
+logical streamed voices mixed with saturation into each firmware block.

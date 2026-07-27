@@ -22,4 +22,15 @@ void lite_display_copy_portrait_rgb565(
     int rotate_180
 );
 
+/*
+ * Rotate a logical 320x240 frame and submit it directly to the portrait
+ * scan buffer.  An 8x8 cache-local transpose preserves contiguous 32-bit
+ * framebuffer stores without the full 153.6 KiB staging frame.
+ */
+void lite_display_present_landscape_rgb565(
+    const uint16_t *source,
+    volatile uint16_t *destination,
+    int rotate_180
+);
+
 #endif

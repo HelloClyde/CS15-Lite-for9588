@@ -52,12 +52,10 @@ int c15_audio_init(
         entry.type != C15_FOURCC('S','N','D','0') ||
         scratch_size < C15_SOUND_HEADER_BYTES ||
         entry.packed_size < C15_SOUND_HEADER_BYTES ||
-        !c15_pak_validate_entry(
-            pak, &entry, scratch, scratch_size) ||
         !c15_pak_read(
             pak, &entry, 0u, header, C15_SOUND_HEADER_BYTES) ||
         !sound_magic(header) ||
-        sound_u32(header + 8u) != BDA_AUDIO_SAMPLE_RATE_22050 ||
+        sound_u32(header + 8u) != 11025u ||
         sound_u16(header + 12u) != C15_SOUND_CUE_COUNT ||
         sound_u16(header + 14u) != 0u) {
         return 0;
@@ -159,18 +157,25 @@ int c15_audio_service(
         if (voice->remaining == 0u) {
             continue;
         }
-        bytes = voice->remaining < C15_SOUND_BLOCK_BYTES ?
-            voice->remaining : C15_SOUND_BLOCK_BYTES;
+        bytes = voice->remaining < C15_SOUND_BLOCK_BYTES / 2u ?
+            voice->remaining : C15_SOUND_BLOCK_BYTES / 2u;
         if (!c15_pak_read(
                 pak, &audio->bank, voice->offset, source, bytes)) {
             voice->remaining = 0u;
             continue;
         }
         for (sample = 0u; sample < bytes / 2u; ++sample) {
-            int32_t mixed = (int32_t)output[sample] + source[sample];
+            uint32_t first = sample * 2u;
+            uint32_t second = first + 1u;
+            int32_t mixed =
+                (int32_t)output[first] + source[sample];
             if (mixed > 32767) mixed = 32767;
             if (mixed < -32768) mixed = -32768;
-            output[sample] = (int16_t)mixed;
+            output[first] = (int16_t)mixed;
+            mixed = (int32_t)output[second] + source[sample];
+            if (mixed > 32767) mixed = 32767;
+            if (mixed < -32768) mixed = -32768;
+            output[second] = (int16_t)mixed;
         }
         advances[channel] = bytes;
         ++active;

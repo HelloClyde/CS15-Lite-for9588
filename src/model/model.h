@@ -23,6 +23,10 @@ typedef struct c15_model_texture {
     uint16_t width;
     uint16_t height;
     uint16_t flags;
+    uint16_t width_mask;
+    uint16_t height_mask;
+    uint16_t width_reciprocal;
+    uint16_t height_reciprocal;
     const uint16_t *palette;
     const uint8_t *pixels;
 } c15_model_texture_t;

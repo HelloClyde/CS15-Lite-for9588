@@ -22,10 +22,10 @@ PAK_VERSION = 2
 PAK_ENDIAN = 0x12345678
 PAK_HEADER = struct.Struct("<8sIIIIII32s")
 PAK_ENTRY = struct.Struct("<4sIIIIII32sI")
-PAK_ALIGNMENT = 4096
+PAK_ALIGNMENT = 512
 
 BSP_MAGIC = b"C15BSP1\0"
-BSP_VERSION = 2
+BSP_VERSION = 3
 BSP_HEADER = struct.Struct("<8sIIIII6h24s")
 BSP_SECTION = struct.Struct("<4sIIIHHI8s")
 BSP_SECTION_ALIGNMENT = 16
@@ -51,6 +51,9 @@ CLIPNODE = struct.Struct("<i2h")
 MODEL = struct.Struct("<9h2x4i3i")
 SPAWN = struct.Struct("<3hhBB")
 BOMB_SITE = struct.Struct("<3h")
+HOSTAGE = struct.Struct("<3h")
+ZONE = struct.Struct("<6hBB")
+DYNAMIC_ENTITY = struct.Struct("<BBH6hII")
 
 SOUND_CUE_SOURCES = (
     "weapons/knife_slash1.wav",
@@ -82,6 +85,20 @@ SOUND_CUE_SOURCES = (
     "weapons/c4_explode1.wav",
     "weapons/c4_disarm.wav",
     "weapons/c4_disarmed.wav",
+    "player/pl_step1.wav",
+    "player/bhit_flesh-1.wav",
+    "player/headshot1.wav",
+    "player/die1.wav",
+    "weapons/ric1.wav",
+    "weapons/grenade_hit1.wav",
+    "weapons/hegrenade-1.wav",
+    "weapons/flashbang-1.wav",
+    "weapons/sg_explode.wav",
+    "hostage/hos1.wav",
+    "radio/ctwin.wav",
+    "radio/terwin.wav",
+    "items/kevlar.wav",
+    "player/pl_pain2.wav",
 )
 
 STUDIO_HEADER_SIZE = 244
@@ -806,10 +823,10 @@ def select_view_animation_sequences(
         "draw_unsil" if unsilenced else "", "draw", "draw2"
     )
     selected = [
-        (b"IDLE", idle, 12),
-        (b"FIRE", fire, 10),
-        (b"RLOD", reload_sequence, 24),
-        (b"DRAW", draw, 12),
+        (b"IDLE", idle, 4),
+        (b"FIRE", fire, 5),
+        (b"RLOD", reload_sequence, 10),
+        (b"DRAW", draw, 6),
     ]
     if any(sequence is None for _, sequence, _ in selected):
         missing = [
@@ -1754,7 +1771,10 @@ def light_for_face(
     for index in range(0, len(samples), 3):
         total += (samples[index] * 77 + samples[index + 1] * 150 +
                   samples[index + 2] * 29) >> 8
-    return max(24, min(255, total // sample_count))
+    # The 9588 LCD loses the lowest GoldSrc lightmap levels; keeping a modest
+    # offline floor makes Nuke/Office corridors readable without runtime
+    # gamma tables or full-precision lightmaps.
+    return max(48, min(255, total // sample_count))
 
 
 def parse_entities(entity_blob: bytes) -> list[dict[str, str]]:
@@ -1833,6 +1853,143 @@ def compile_bomb_sites(
         seen.add(origin)
         output += BOMB_SITE.pack(*origin)
         manifest.append({"x": origin[0], "y": origin[1], "z": origin[2]})
+    return bytes(output), manifest
+
+
+def entity_bounds(
+    values: dict[str, str],
+    models: list[tuple],
+    label: str,
+    point_radius: int = 96,
+) -> tuple[int, int, int, int, int, int] | None:
+    model_name = values.get("model", "")
+    if re.fullmatch(r"\*[0-9]+", model_name):
+        model_index = int(model_name[1:])
+        if 0 < model_index < len(models):
+            model = models[model_index]
+            return tuple(
+                checked_i16(model[index], f"{label} bound")
+                for index in range(6)
+            )
+    origin_values = values.get("origin", "").split()
+    if len(origin_values) != 3:
+        return None
+    origin = [
+        checked_i16(float(value), f"{label} origin")
+        for value in origin_values
+    ]
+    return (
+        checked_i16(origin[0] - point_radius, f"{label} minimum x"),
+        checked_i16(origin[1] - point_radius, f"{label} minimum y"),
+        checked_i16(origin[2] - point_radius, f"{label} minimum z"),
+        checked_i16(origin[0] + point_radius, f"{label} maximum x"),
+        checked_i16(origin[1] + point_radius, f"{label} maximum y"),
+        checked_i16(origin[2] + point_radius, f"{label} maximum z"),
+    )
+
+
+def compile_hostages(
+    entity_blob: bytes,
+) -> tuple[bytes, list[dict[str, int]]]:
+    output = bytearray()
+    manifest: list[dict[str, int]] = []
+    for values in parse_entities(entity_blob):
+        if values.get("classname", "").lower() != "hostage_entity":
+            continue
+        raw_origin = values.get("origin", "").split()
+        if len(raw_origin) != 3:
+            continue
+        origin = [
+            checked_i16(float(value), "hostage origin")
+            for value in raw_origin
+        ]
+        output += HOSTAGE.pack(*origin)
+        manifest.append(
+            {"x": origin[0], "y": origin[1], "z": origin[2]}
+        )
+    return bytes(output), manifest
+
+
+def compile_zones(
+    entity_blob: bytes,
+    models: list[tuple],
+    classnames: tuple[str, ...],
+    label: str,
+    point_radius: int = 96,
+    include_team: bool = False,
+) -> tuple[bytes, list[dict[str, int]]]:
+    output = bytearray()
+    manifest: list[dict[str, int]] = []
+    for values in parse_entities(entity_blob):
+        if values.get("classname", "").lower() not in classnames:
+            continue
+        bounds = entity_bounds(values, models, label, point_radius)
+        if bounds is None:
+            continue
+        team = 0
+        if include_team:
+            try:
+                team = int(values.get("team", "0"))
+            except ValueError:
+                team = 0
+            if team not in (1, 2):
+                team = 0
+        output += ZONE.pack(*bounds, team, 0)
+        manifest.append({
+            "minimum_x": bounds[0],
+            "minimum_y": bounds[1],
+            "minimum_z": bounds[2],
+            "maximum_x": bounds[3],
+            "maximum_y": bounds[4],
+            "maximum_z": bounds[5],
+            "team": team,
+        })
+    return bytes(output), manifest
+
+
+def compile_dynamic_entities(
+    entity_blob: bytes,
+    models: list[tuple],
+) -> tuple[bytes, list[dict[str, int | str]]]:
+    kinds = {
+        "func_door": 1,
+        "func_door_rotating": 1,
+        "func_button": 2,
+        "func_breakable": 3,
+        "func_plat": 4,
+        "func_train": 4,
+        "func_tracktrain": 4,
+    }
+    output = bytearray()
+    manifest: list[dict[str, int | str]] = []
+    for values in parse_entities(entity_blob):
+        classname = values.get("classname", "").lower()
+        kind = kinds.get(classname)
+        if kind is None:
+            continue
+        bounds = entity_bounds(values, models, classname, 64)
+        if bounds is None:
+            continue
+        model_name = values.get("model", "")
+        model_index = (
+            int(model_name[1:])
+            if re.fullmatch(r"\*[0-9]+", model_name) else 0
+        )
+        target = values.get("target", "").lower()
+        targetname = values.get("targetname", "").lower()
+        flags = 1 if values.get("spawnflags", "0") == "1" else 0
+        output += DYNAMIC_ENTITY.pack(
+            kind, flags, model_index, *bounds,
+            fnv1a(target) if target else 0,
+            fnv1a(targetname) if targetname else 0,
+        )
+        manifest.append({
+            "classname": classname,
+            "kind": kind,
+            "model": model_index,
+            "target": target,
+            "targetname": targetname,
+        })
     return bytes(output), manifest
 
 
@@ -1922,8 +2079,15 @@ def compile_bsp(
         # without changing repeated sampling.
         tw = max(1, textures[texture_id].width >> selected_mip)
         th = max(1, textures[texture_id].height >> selected_mip)
-        base_u = math.floor(min(item[0] for item in face_uv) / tw) * tw
-        base_v = math.floor(min(item[1] for item in face_uv) / th) * th
+        minimum_u = min(item[0] for item in face_uv)
+        maximum_u = max(item[0] for item in face_uv)
+        minimum_v = min(item[1] for item in face_uv)
+        maximum_v = max(item[1] for item in face_uv)
+        # Center the face's range before choosing a texture-period offset.
+        # Basing the shift only on the minimum can turn an exactly representable
+        # 2048.0 edge into +32768 in Q12.4 (de_inferno face 3910).
+        base_u = round(((minimum_u + maximum_u) * 0.5) / tw) * tw
+        base_v = round(((minimum_v + maximum_v) * 0.5) / th) * th
         for position, uv in zip(face_positions, face_uv):
             vertices_out += SURFACE_VERTEX.pack(
                 checked_i16(position[0], f"face {face_index} x"),
@@ -1977,6 +2141,25 @@ def compile_bsp(
     bomb_sites_out, bomb_sites_manifest = compile_bomb_sites(
         bsp.lump(LUMP_ENTITIES), model_source
     )
+    hostages_out, hostages_manifest = compile_hostages(
+        bsp.lump(LUMP_ENTITIES)
+    )
+    rescue_out, rescue_manifest = compile_zones(
+        bsp.lump(LUMP_ENTITIES), model_source,
+        ("func_hostage_rescue", "info_hostage_rescue"),
+        "hostage rescue zone", 128,
+    )
+    buy_out, buy_manifest = compile_zones(
+        bsp.lump(LUMP_ENTITIES), model_source,
+        ("func_buyzone",), "buy zone", 160, True,
+    )
+    ladders_out, ladders_manifest = compile_zones(
+        bsp.lump(LUMP_ENTITIES), model_source,
+        ("func_ladder",), "ladder", 32,
+    )
+    dynamic_out, dynamic_manifest = compile_dynamic_entities(
+        bsp.lump(LUMP_ENTITIES), model_source
+    )
 
     bounds_values: list[float] = []
     if model_source:
@@ -2008,6 +2191,26 @@ def compile_bsp(
         pack_section(
             b"BSIT", bomb_sites_out,
             len(bomb_sites_manifest), BOMB_SITE.size
+        ),
+        pack_section(
+            b"HSTG", hostages_out,
+            len(hostages_manifest), HOSTAGE.size
+        ),
+        pack_section(
+            b"RSQZ", rescue_out,
+            len(rescue_manifest), ZONE.size
+        ),
+        pack_section(
+            b"BYZN", buy_out,
+            len(buy_manifest), ZONE.size
+        ),
+        pack_section(
+            b"LADR", ladders_out,
+            len(ladders_manifest), ZONE.size
+        ),
+        pack_section(
+            b"DENT", dynamic_out,
+            len(dynamic_manifest), DYNAMIC_ENTITY.size
         ),
     ]
     directory_size = len(sections) * BSP_SECTION.size
@@ -2059,6 +2262,11 @@ def compile_bsp(
         "textures": len(textures),
         "spawns": spawns_manifest,
         "bomb_sites": bomb_sites_manifest,
+        "hostages": hostages_manifest,
+        "rescue_zones": rescue_manifest,
+        "buy_zones": buy_manifest,
+        "ladders": ladders_manifest,
+        "dynamic_entities": dynamic_manifest,
         "visibility_bytes": len(bsp.lump(LUMP_VISIBILITY)),
         "source_lighting_bytes": len(lighting),
         "chunk_bytes": len(output),
@@ -2280,8 +2488,11 @@ def validate_bsp_chunk(data: bytes) -> dict[str, object]:
             raise AssetError(
                 f"C15BSP sections overlap: {previous[2]} and {current[2]}"
             )
-    required = {"VERT", "SURF", "PLAN", "NODE", "LEAF", "MARK",
-                "VISI", "CLIP", "MODL", "TNAM", "SPWN", "BSIT"}
+    required = {
+        "VERT", "SURF", "PLAN", "NODE", "LEAF", "MARK",
+        "VISI", "CLIP", "MODL", "TNAM", "SPWN", "BSIT",
+        "HSTG", "RSQZ", "BYZN", "LADR", "DENT",
+    }
     if required - sections.keys():
         raise AssetError(f"missing C15BSP sections: {sorted(required - sections.keys())}")
     return {
@@ -2373,13 +2584,15 @@ def compile_sound_bank(cstrike: Path) -> tuple[bytes, dict[str, object]]:
             if (
                 source.getcomptype() != "NONE"
                 or source.getnchannels() != 1
-                or source.getframerate() != 22050
+                or source.getframerate() not in (11025, 22050)
                 or source.getsampwidth() not in (1, 2)
             ):
                 raise AssetError(
-                    f"{path.name} must be 22050 Hz mono PCM, 8 or 16 bit"
+                    f"{path.name} must be 11025/22050 Hz mono PCM, "
+                    "8 or 16 bit"
                 )
             source_frames = source.getnframes()
+            source_rate = source.getframerate()
             raw = source.readframes(source_frames)
             if source.getsampwidth() == 1:
                 pcm = bytearray(len(raw) * 2)
@@ -2388,9 +2601,15 @@ def compile_sound_bank(cstrike: Path) -> tuple[bytes, dict[str, object]]:
                 output = bytes(pcm)
             else:
                 output = raw
+            if source_rate == 22050:
+                output = b"".join(
+                    output[index:index + 2]
+                    for index in range(0, len(output), 4)
+                )
         converted.append(output)
         cue_manifest.append({
             "source": str(path),
+            "source_rate": source_rate,
             "source_bits": len(raw) * 8 // max(source_frames, 1),
             "samples": len(output) // 2,
             "pcm_bytes": len(output),
@@ -2404,13 +2623,13 @@ def compile_sound_bank(cstrike: Path) -> tuple[bytes, dict[str, object]]:
         payload.extend(pcm)
         cursor += len(pcm)
     chunk = (
-        SOUND_HEADER.pack(b"C15SND1\0", 22050, len(converted), 0)
+        SOUND_HEADER.pack(b"C15SND1\0", 11025, len(converted), 0)
         + bytes(directory)
         + bytes(payload)
     )
     return chunk, {
         "name": "sound/game",
-        "sample_rate": 22050,
+        "sample_rate": 11025,
         "bits": 16,
         "channels": 1,
         "cues": cue_manifest,
@@ -2425,7 +2644,7 @@ def validate_sound_chunk(data: bytes) -> dict[str, object]:
     magic, sample_rate, count, reserved = SOUND_HEADER.unpack_from(data)
     if (
         magic != b"C15SND1\0"
-        or sample_rate != 22050
+        or sample_rate != 11025
         or count != len(SOUND_CUE_SOURCES)
         or reserved != 0
         or len(data) < SOUND_HEADER.size + count * SOUND_CUE.size
@@ -2560,7 +2779,7 @@ def parse_map_specification(
 def placeholder_texture(
     reference: MipTexture,
 ) -> tuple[bytes, dict[str, object]]:
-    # Special tool/sky surfaces do not sample a WAD texture in M12.
+    # Special tool/sky surfaces do not sample a WAD texture at runtime.
     placeholder_pixels = bytes([0] * 16 * 16)
     placeholder_palette = bytearray(128)
     struct.pack_into("<H", placeholder_palette, 0, rgb565(48, 80, 96))
@@ -2609,6 +2828,7 @@ def build_command(args: argparse.Namespace) -> None:
     for map_name, map_path in map_sources:
         bsp = GoldSrcBsp(map_path)
         references = parse_bsp_textures(bsp)
+        runtime_references: list[MipTexture] = []
         selected_mips: list[int] = []
         missing_for_map: list[str] = []
         for reference in references:
@@ -2619,12 +2839,29 @@ def build_command(args: argparse.Namespace) -> None:
             else:
                 chunk, detail = compile_texture(texture)
             selected_mips.append(int(detail["selected_mip"]))
-            asset_name = f"tex/{reference.name}"
+            runtime_reference = reference
+            asset_name = f"tex/{runtime_reference.name}"
             previous = texture_assets.get(asset_name)
             if previous is not None and previous.data != chunk:
-                raise AssetError(
-                    f"maps require conflicting texture data: {asset_name}"
+                # Some historical maps embed a different bitmap under a WAD
+                # name also used by another map (for example Office's
+                # painting1). Give only the conflicting copy a compact,
+                # deterministic runtime name and rewrite this map's TNAM
+                # reference. Shared identical textures remain deduplicated.
+                suffix = f"{fnv1a(map_name + '/' + reference.name):08x}"
+                alias = f"{reference.name[:6]}_{suffix}"[:15]
+                asset_name = f"tex/{alias}"
+                collision = texture_assets.get(asset_name)
+                if collision is not None and collision.data != chunk:
+                    raise AssetError(
+                        f"texture alias collision: {asset_name}"
+                    )
+                runtime_reference = MipTexture(
+                    alias, reference.width, reference.height,
+                    reference.offsets, reference.blob, reference.source
                 )
+                previous = collision
+            runtime_references.append(runtime_reference)
             if previous is None:
                 texture_assets[asset_name] = PakAsset(
                     b"TEX0", asset_name, chunk
@@ -2650,7 +2887,7 @@ def build_command(args: argparse.Namespace) -> None:
                   "--allow-missing only for an incomplete development build)"
             )
         bsp_chunk, bsp_detail = compile_bsp(
-            bsp, references, selected_mips
+            bsp, runtime_references, selected_mips
         )
         bsp_detail["name"] = map_name
         map_assets.append(PakAsset(
@@ -2790,7 +3027,7 @@ def build_command(args: argparse.Namespace) -> None:
         assets.append(PakAsset(b"SND0", "sound/game", sound_chunk))
         sound_manifest.append(sound_detail)
     assets.append(PakAsset(
-        b"VER0", "meta/m12", b"CS15LITE-M12-MAPS-WEAPONS-C4-SCORE\0"
+        b"VER0", "meta/m15", b"CS15LITE-M15-MAPS-DROPS-SPECTATOR-TACTICS\0"
     ))
     pack = build_pack(assets)
     validation = validate_pack(pack)
@@ -2800,7 +3037,7 @@ def build_command(args: argparse.Namespace) -> None:
     manifest = {
         "format": "CS15 Lite asset manifest",
         "format_version": 1,
-        "runtime_resource_revision": "M12",
+        "runtime_resource_revision": "M15",
         "map": map_manifest[0],
         "maps": map_manifest,
         "textures": texture_manifest,
@@ -2911,7 +3148,7 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--audio",
         action="store_true",
-        help="compile the M12 historical weapon/objective cues into sound/game",
+        help="compile the M15 historical combat/objective cues into sound/game",
     )
     build.add_argument(
         "--allow-missing",

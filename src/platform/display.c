@@ -152,3 +152,69 @@ void lite_display_copy_portrait_rgb565(
     __asm__ volatile("sync" ::: "memory");
 #endif
 }
+
+void lite_display_present_landscape_rgb565(
+    const uint16_t *restrict source,
+    volatile uint16_t *restrict destination,
+    int rotate_180
+)
+{
+    uint16_t tile[TILE_SIZE][TILE_SIZE] __attribute__((aligned(4)));
+    uint32_t block_y;
+
+    if (!source || !destination) {
+        return;
+    }
+    for (block_y = 0u; block_y < DESTINATION_HEIGHT;
+         block_y += TILE_SIZE) {
+        uint32_t block_x;
+        for (block_x = 0u; block_x < DESTINATION_WIDTH;
+             block_x += TILE_SIZE) {
+            uint32_t column;
+            uint32_t row;
+            /*
+             * Read eight contiguous source pixels from each of eight
+             * source rows.  The small transpose remains hot in D-cache.
+             */
+            for (column = 0u; column < TILE_SIZE; ++column) {
+                const uint16_t *source_row;
+                if (!rotate_180) {
+                    source_row =
+                        source + (block_x + column) * SOURCE_WIDTH;
+                    for (row = 0u; row < TILE_SIZE; ++row) {
+                        tile[row][column] = source_row[
+                            SOURCE_WIDTH - 1u - block_y - row
+                        ];
+                    }
+                } else {
+                    source_row = source +
+                        (SOURCE_HEIGHT - 1u - block_x - column) *
+                        SOURCE_WIDTH;
+                    for (row = 0u; row < TILE_SIZE; ++row) {
+                        tile[row][column] = source_row[block_y + row];
+                    }
+                }
+            }
+            /*
+             * Four aligned 32-bit writes per destination row halve the
+             * number of uncached KSEG1 stores compared with 16-bit output.
+             */
+            for (row = 0u; row < TILE_SIZE; ++row) {
+                const lite_alias_u32 *input =
+                    (const lite_alias_u32 *)tile[row];
+                volatile lite_alias_u32 *output =
+                    (volatile lite_alias_u32 *)(
+                        destination +
+                        (block_y + row) * DESTINATION_WIDTH + block_x
+                    );
+                output[0] = input[0];
+                output[1] = input[1];
+                output[2] = input[2];
+                output[3] = input[3];
+            }
+        }
+    }
+#if defined(__mips__)
+    __asm__ volatile("sync" ::: "memory");
+#endif
+}

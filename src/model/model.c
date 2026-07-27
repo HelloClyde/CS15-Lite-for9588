@@ -25,6 +25,11 @@ static uint32_t read_u32(const uint8_t *data)
         ((uint32_t)data[3] << 24);
 }
 
+static int is_power_of_two(uint16_t value)
+{
+    return value != 0u && (value & (uint16_t)(value - 1u)) == 0u;
+}
+
 static int bytes_equal(const uint8_t *left, const char *right, uint32_t count)
 {
     uint32_t index;
@@ -133,6 +138,14 @@ int c15_model_load(
         }
         texture->palette = (const uint16_t *)storage;
         texture->pixels = storage + TEX_PALETTE_BYTES;
+        texture->width_mask = is_power_of_two(texture->width) ?
+            (uint16_t)(texture->width - 1u) : 0u;
+        texture->height_mask = is_power_of_two(texture->height) ?
+            (uint16_t)(texture->height - 1u) : 0u;
+        texture->width_reciprocal = texture->width > 1u ?
+            (uint16_t)(65536u / texture->width) : 0u;
+        texture->height_reciprocal = texture->height > 1u ?
+            (uint16_t)(65536u / texture->height) : 0u;
     }
     for (index = 0u; index < model->triangle_count; ++index) {
         const uint8_t *triangle =

@@ -27,6 +27,10 @@ typedef struct c15_pak {
     uint32_t entry_count;
     uint32_t directory_offset;
     uint32_t data_offset;
+    uint32_t last_seek_expected;
+    int32_t last_seek_result;
+    uint32_t last_read_expected;
+    int32_t last_read_result;
 } c15_pak_t;
 
 int c15_pak_open(c15_pak_t *pak, const char *path);

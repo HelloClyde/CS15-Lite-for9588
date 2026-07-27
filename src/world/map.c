@@ -5,9 +5,13 @@
 
 #define BSP_HEADER_BYTES 64u
 #define BSP_SECTION_BYTES 32u
-#define BSP_VERSION 2u
+#define BSP_VERSION 3u
+#define DEFAULT_FOCAL_LENGTH 160u
 #define TEX_HEADER_BYTES 24u
 #define BSP_SECTION_STREAMED 1u
+#define C15_MAX_VISIBILITY_ROW_BYTES 512u
+#define C15_MAX_ENCODED_VISIBILITY_BYTES \
+    (C15_MAX_VISIBILITY_ROW_BYTES * 2u)
 
 static uint16_t read_u16(const uint8_t *data)
 {
@@ -97,16 +101,21 @@ static int load_sections(
     uint32_t count;
     uint32_t index;
     if (!c15_pak_read(
-            map->pak, &map->entry, 0u, header, sizeof(header)) ||
-        !bytes_equal(header, "C15BSP1\0", 8u) ||
+            map->pak, &map->entry, 0u, header, sizeof(header))) {
+        map->load_error = 2u;
+        return 0;
+    }
+    if (!bytes_equal(header, "C15BSP1\0", 8u) ||
         read_u32(header + 8) != BSP_VERSION ||
         read_u32(header + 16) != map->entry.packed_size) {
+        map->load_error = 3u;
         return 0;
     }
     count = read_u32(header + 12);
     if (count == 0u || count > C15_MAP_MAX_SECTIONS ||
         BSP_HEADER_BYTES + count * BSP_SECTION_BYTES >
             map->entry.packed_size) {
+        map->load_error = 3u;
         return 0;
     }
     map->source_crc32 = read_u32(header + 20);
@@ -120,6 +129,7 @@ static int load_sections(
                 map->pak, &map->entry,
                 BSP_HEADER_BYTES + index * BSP_SECTION_BYTES,
                 record, sizeof(record))) {
+            map->load_error = 4u;
             return 0;
         }
         section->type = read_u32(record);
@@ -134,6 +144,7 @@ static int load_sections(
             offset > map->entry.packed_size - section->size ||
             (section->stride != 0u &&
              section->count * section->stride != section->size)) {
+            map->load_error = 5u;
             return 0;
         }
         if ((section->flags & BSP_SECTION_STREAMED) != 0u) {
@@ -145,11 +156,18 @@ static int load_sections(
             destination = (uint8_t *)lite_arena_alloc(
                 arena, section->size ? section->size : 1u, 16u
             );
-            if (!destination ||
-                !c15_pak_read(
+            if (!destination) {
+                map->load_error = 6u;
+                return 0;
+            }
+            if (!c15_pak_read(
                     map->pak, &map->entry, offset,
-                    destination, section->size) ||
-                c15_crc32(destination, section->size) != checksum) {
+                    destination, section->size)) {
+                map->load_error = 7u;
+                return 0;
+            }
+            if (c15_crc32(destination, section->size) != checksum) {
+                map->load_error = 8u;
                 return 0;
             }
             section->data = destination;
@@ -192,11 +210,28 @@ static int cache_sections(c15_map_t *map)
     map->bomb_site_section = c15_map_section(
         map, C15_FOURCC('B','S','I','T')
     );
+    map->hostage_section = c15_map_section(
+        map, C15_FOURCC('H','S','T','G')
+    );
+    map->rescue_zone_section = c15_map_section(
+        map, C15_FOURCC('R','S','Q','Z')
+    );
+    map->buy_zone_section = c15_map_section(
+        map, C15_FOURCC('B','Y','Z','N')
+    );
+    map->ladder_section = c15_map_section(
+        map, C15_FOURCC('L','A','D','R')
+    );
+    map->dynamic_section = c15_map_section(
+        map, C15_FOURCC('D','E','N','T')
+    );
     return map->vertex_section && map->surface_section &&
         map->plane_section && map->node_section && map->leaf_section &&
         map->mark_section && map->visibility_section &&
         map->clip_section && map->model_section &&
-        map->bomb_site_section;
+        map->bomb_site_section && map->hostage_section &&
+        map->rescue_zone_section && map->buy_zone_section &&
+        map->ladder_section && map->dynamic_section;
 }
 
 static int load_textures(c15_map_t *map, lite_arena_t *arena)
@@ -300,6 +335,7 @@ static int load_spawn(c15_map_t *map)
     map->spawn.pitch = 0;
     map->spawn.yaw_q8 = (uint16_t)((uint16_t)map->spawn.yaw << 8);
     map->spawn.pitch_q8 = 0;
+    map->spawn.focal_length = DEFAULT_FOCAL_LENGTH;
     return 1;
 }
 
@@ -339,6 +375,7 @@ int c15_map_spawn(
     camera->pitch = 0;
     camera->yaw_q8 = (uint16_t)((uint16_t)camera->yaw << 8);
     camera->pitch_q8 = 0;
+    camera->focal_length = DEFAULT_FOCAL_LENGTH;
     *team = spawn[8];
     return *team == 1u || *team == 2u;
 }
@@ -373,6 +410,326 @@ int c15_map_bomb_site(
     return 1;
 }
 
+uint32_t c15_map_hostage_count(const c15_map_t *map)
+{
+    const c15_map_section_t *hostages =
+        map ? map->hostage_section : 0;
+    if (!hostages || hostages->stride != 6u) {
+        return 0u;
+    }
+    return hostages->count;
+}
+
+int c15_map_hostage(
+    const c15_map_t *map,
+    uint32_t index,
+    int32_t *x,
+    int32_t *y,
+    int32_t *z
+)
+{
+    const c15_map_section_t *hostages =
+        map ? map->hostage_section : 0;
+    const uint8_t *record;
+    if (!hostages || hostages->stride != 6u ||
+        index >= hostages->count || !x || !y || !z) {
+        return 0;
+    }
+    record = hostages->data + index * hostages->stride;
+    *x = read_i16(record);
+    *y = read_i16(record + 2);
+    *z = read_i16(record + 4);
+    return 1;
+}
+
+static int zone_contains(
+    const c15_map_section_t *section,
+    uint32_t index,
+    int32_t x,
+    int32_t y,
+    int32_t z,
+    uint8_t team
+)
+{
+    const uint8_t *zone;
+    uint8_t zone_team;
+    if (!section || section->stride != 14u ||
+        index >= section->count) {
+        return 0;
+    }
+    zone = section->data + index * section->stride;
+    zone_team = zone[12];
+    return (zone_team == 0u || team == 0u || zone_team == team) &&
+        x >= read_i16(zone) && x <= read_i16(zone + 6) &&
+        y >= read_i16(zone + 2) && y <= read_i16(zone + 8) &&
+        z >= read_i16(zone + 4) - 48 &&
+        z <= read_i16(zone + 10) + 48;
+}
+
+static int in_zone_section(
+    const c15_map_section_t *section,
+    uint8_t team,
+    int32_t x,
+    int32_t y,
+    int32_t z
+)
+{
+    uint32_t index;
+    for (index = 0u; section && index < section->count; ++index) {
+        if (zone_contains(section, index, x, y, z, team)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int c15_map_in_rescue_zone(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
+)
+{
+    const c15_map_section_t *zones =
+        map ? map->rescue_zone_section : 0;
+    uint32_t index;
+    if (zones && zones->count != 0u) {
+        return in_zone_section(zones, 0u, x, y, z);
+    }
+    /*
+     * cs_assault from Counter-Strike 1.5 has no explicit rescue brush.
+     * GoldSrc still treats the CT start area as the extraction zone.
+     */
+    for (index = 0u; map && index < c15_map_spawn_count(map); ++index) {
+        c15_camera_t spawn;
+        uint8_t spawn_team;
+        int32_t dx;
+        int32_t dy;
+        if (!c15_map_spawn(map, index, &spawn, &spawn_team) ||
+            spawn_team != 2u) {
+            continue;
+        }
+        dx = x - spawn.x;
+        dy = y - spawn.y;
+        if (dx >= -256 && dx <= 256 &&
+            dy >= -256 && dy <= 256 &&
+            z >= spawn.z - 160 && z <= spawn.z + 160) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int c15_map_in_buy_zone(
+    const c15_map_t *map,
+    uint8_t team,
+    int32_t x,
+    int32_t y,
+    int32_t z
+)
+{
+    const c15_map_section_t *zones =
+        map ? map->buy_zone_section : 0;
+    uint32_t index;
+    if (zones && zones->count != 0u) {
+        return in_zone_section(zones, team, x, y, z);
+    }
+    /*
+     * A few historical custom maps omit func_buyzone. Match GoldSrc's
+     * practical fallback by accepting a compact area around team spawns.
+     */
+    for (index = 0u; map && index < c15_map_spawn_count(map); ++index) {
+        c15_camera_t spawn;
+        uint8_t spawn_team;
+        int32_t dx;
+        int32_t dy;
+        if (!c15_map_spawn(map, index, &spawn, &spawn_team) ||
+            spawn_team != team) {
+            continue;
+        }
+        dx = x - spawn.x;
+        dy = y - spawn.y;
+        if (dx >= -256 && dx <= 256 &&
+            dy >= -256 && dy <= 256 &&
+            z >= spawn.z - 128 && z <= spawn.z + 128) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int c15_map_on_ladder(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
+)
+{
+    const c15_map_section_t *ladders =
+        map ? map->ladder_section : 0;
+    uint32_t index;
+    for (index = 0u;
+         ladders && ladders->stride == 14u &&
+         index < ladders->count; ++index) {
+        const uint8_t *zone =
+            ladders->data + index * ladders->stride;
+        if (x >= read_i16(zone) - 24 &&
+            x <= read_i16(zone + 6) + 24 &&
+            y >= read_i16(zone + 2) - 24 &&
+            y <= read_i16(zone + 8) + 24 &&
+            z >= read_i16(zone + 4) - 48 &&
+            z <= read_i16(zone + 10) + 48) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint32_t c15_map_dynamic_count(const c15_map_t *map)
+{
+    const c15_map_section_t *section =
+        map ? map->dynamic_section : 0;
+    if (!section || section->stride != 24u) {
+        return 0u;
+    }
+    return section->count < C15_MAP_MAX_DYNAMIC_ENTITIES ?
+        section->count : C15_MAP_MAX_DYNAMIC_ENTITIES;
+}
+
+int c15_map_dynamic(
+    const c15_map_t *map,
+    uint32_t index,
+    c15_dynamic_entity_t *entity
+)
+{
+    const c15_map_section_t *section =
+        map ? map->dynamic_section : 0;
+    const uint8_t *record;
+    if (!section || section->stride != 24u ||
+        index >= c15_map_dynamic_count(map) || !entity) {
+        return 0;
+    }
+    record = section->data + index * section->stride;
+    entity->kind = record[0];
+    entity->flags = record[1];
+    entity->model = read_u16(record + 2);
+    entity->minimum_x = read_i16(record + 4);
+    entity->minimum_y = read_i16(record + 6);
+    entity->minimum_z = read_i16(record + 8);
+    entity->maximum_x = read_i16(record + 10);
+    entity->maximum_y = read_i16(record + 12);
+    entity->maximum_z = read_i16(record + 14);
+    entity->target_hash = read_u32(record + 16);
+    entity->targetname_hash = read_u32(record + 20);
+    return 1;
+}
+
+static uint32_t squared_distance_to_dynamic(
+    const c15_dynamic_entity_t *entity,
+    int32_t x,
+    int32_t y,
+    int32_t z
+)
+{
+    int32_t center_x =
+        ((int32_t)entity->minimum_x + entity->maximum_x) / 2;
+    int32_t center_y =
+        ((int32_t)entity->minimum_y + entity->maximum_y) / 2;
+    int32_t center_z =
+        ((int32_t)entity->minimum_z + entity->maximum_z) / 2;
+    int32_t dx = x - center_x;
+    int32_t dy = y - center_y;
+    int32_t dz = z - center_z;
+    if (dx < -32767 || dx > 32767 ||
+        dy < -32767 || dy > 32767 ||
+        dz < -32767 || dz > 32767) {
+        return 0xffffffffu;
+    }
+    return (uint32_t)(
+        (int64_t)dx * dx + (int64_t)dy * dy + (int64_t)dz * dz
+    );
+}
+
+int c15_map_use_dynamic(
+    c15_map_t *map, int32_t x, int32_t y, int32_t z
+)
+{
+    uint32_t count = c15_map_dynamic_count(map);
+    uint32_t nearest = 0xffffffffu;
+    uint32_t selected = count;
+    uint32_t index;
+    c15_dynamic_entity_t selected_entity = {0};
+    for (index = 0u; index < count; ++index) {
+        c15_dynamic_entity_t entity;
+        uint32_t distance;
+        if (!c15_map_dynamic(map, index, &entity) ||
+            entity.kind == C15_DYNAMIC_BREAKABLE) {
+            continue;
+        }
+        distance = squared_distance_to_dynamic(&entity, x, y, z);
+        if (distance <= 176u * 176u && distance < nearest) {
+            nearest = distance;
+            selected = index;
+            selected_entity = entity;
+        }
+    }
+    if (selected == count) {
+        return 0;
+    }
+    if (selected_entity.kind == C15_DYNAMIC_BUTTON &&
+        selected_entity.target_hash != 0u) {
+        for (index = 0u; index < count; ++index) {
+            c15_dynamic_entity_t entity;
+            if (c15_map_dynamic(map, index, &entity) &&
+                entity.targetname_hash == selected_entity.target_hash) {
+                map->dynamic_open_bits ^= 1u << index;
+            }
+        }
+    } else {
+        map->dynamic_open_bits ^= 1u << selected;
+    }
+    return 1;
+}
+
+int c15_map_damage_breakable(
+    c15_map_t *map, int32_t x, int32_t y, int32_t z
+)
+{
+    uint32_t index;
+    uint32_t count = c15_map_dynamic_count(map);
+    for (index = 0u; index < count; ++index) {
+        c15_dynamic_entity_t entity;
+        if (!c15_map_dynamic(map, index, &entity) ||
+            entity.kind != C15_DYNAMIC_BREAKABLE ||
+            (map->dynamic_broken_bits & (1u << index)) != 0u) {
+            continue;
+        }
+        if (x >= entity.minimum_x && x <= entity.maximum_x &&
+            y >= entity.minimum_y && y <= entity.maximum_y &&
+            z >= entity.minimum_z && z <= entity.maximum_z) {
+            if (map->dynamic_damage[index] < 3u) {
+                ++map->dynamic_damage[index];
+            }
+            if (map->dynamic_damage[index] >= 3u) {
+                map->dynamic_broken_bits |= 1u << index;
+                return 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+void c15_map_dynamic_tick(c15_map_t *map)
+{
+    uint32_t index;
+    uint32_t count = c15_map_dynamic_count(map);
+    for (index = 0u; index < count; ++index) {
+        uint8_t target =
+            (map->dynamic_open_bits & (1u << index)) != 0u ?
+                8u : 0u;
+        if (map->dynamic_position[index] < target) {
+            ++map->dynamic_position[index];
+        } else if (map->dynamic_position[index] > target) {
+            --map->dynamic_position[index];
+        }
+    }
+}
+
 int c15_map_load(
     c15_map_t *map,
     const c15_pak_t *pak,
@@ -389,14 +746,31 @@ int c15_map_load(
     }
     bda_memset(map, 0, sizeof(*map));
     map->pak = pak;
+    /*
+     * Do not rescan the complete BSP entry here. Large FAT files on the
+     * device are read through a cluster chain and the redundant pass both
+     * delays map entry and can fail after otherwise valid long seeks.
+     * load_sections validates the BSP header and every resident section CRC;
+     * streamed visibility data remains bounds-checked on each read.
+     */
     if (!c15_pak_find(pak, map_name, &map->entry) ||
-        map->entry.type != C15_FOURCC('B','S','P','0') ||
-        !c15_pak_validate_entry(
-            pak, &map->entry, scratch, scratch_size) ||
-        !load_sections(map, map_arena, scratch, scratch_size) ||
-        !cache_sections(map) ||
-        !load_textures(map, texture_arena) ||
-        !load_spawn(map)) {
+        map->entry.type != C15_FOURCC('B','S','P','0')) {
+        map->load_error = 1u;
+        return 0;
+    }
+    if (!load_sections(map, map_arena, scratch, scratch_size)) {
+        return 0;
+    }
+    if (!cache_sections(map)) {
+        map->load_error = 9u;
+        return 0;
+    }
+    if (!load_textures(map, texture_arena)) {
+        map->load_error = 10u;
+        return 0;
+    }
+    if (!load_spawn(map)) {
+        map->load_error = 11u;
         return 0;
     }
     map->loaded = 1;
@@ -540,8 +914,12 @@ int c15_map_build_visible(
     const c15_map_section_t *visibility =
         map ? map->visibility_section : 0;
     const c15_map_section_t *models = map ? map->model_section : 0;
-    uint8_t leaf_bits[256];
-    uint8_t encoded_visibility[512];
+    /*
+     * Historical cs_office is the largest supported PVS row. Allow up to
+     * 4096 world visibility leaves and the worst-case zero-run encoding.
+     */
+    uint8_t leaf_bits[C15_MAX_VISIBILITY_ROW_BYTES];
+    uint8_t encoded_visibility[C15_MAX_ENCODED_VISIBILITY_BYTES];
     const uint8_t *visibility_data;
     uint32_t visibility_size;
     uint32_t row_bytes;
@@ -663,6 +1041,35 @@ int c15_map_hull_contents(
     const c15_map_section_t *models = map ? map->model_section : 0;
     int32_t node_index;
     uint32_t guard = 0u;
+    uint32_t dynamic_index;
+    for (dynamic_index = 0u;
+         map && dynamic_index < c15_map_dynamic_count(map);
+         ++dynamic_index) {
+        c15_dynamic_entity_t entity;
+        uint32_t mask = 1u << dynamic_index;
+        int32_t horizontal_margin = hull == 0u ? 0 : 16;
+        int32_t vertical_margin = hull == 0u ? 0 : 36;
+        int32_t vertical_offset;
+        if (!c15_map_dynamic(map, dynamic_index, &entity) ||
+            entity.kind == C15_DYNAMIC_BUTTON ||
+            map->dynamic_position[dynamic_index] >= 8u ||
+            (map->dynamic_broken_bits & mask) != 0u) {
+            continue;
+        }
+        vertical_offset =
+            ((int32_t)entity.maximum_z - entity.minimum_z) *
+            map->dynamic_position[dynamic_index] / 8;
+        if (x >= entity.minimum_x - horizontal_margin &&
+            x <= entity.maximum_x + horizontal_margin &&
+            y >= entity.minimum_y - horizontal_margin &&
+            y <= entity.maximum_y + horizontal_margin &&
+            z >= entity.minimum_z + vertical_offset -
+                vertical_margin &&
+            z <= entity.maximum_z + vertical_offset +
+                vertical_margin) {
+            return -2;
+        }
+    }
     if (!models || hull > 3u || models->stride != 48u ||
         models->count == 0u) {
         return -2;
@@ -689,7 +1096,7 @@ int c15_map_hull_contents(
                 (int64_t)plane.nx * x +
                 (int64_t)plane.ny * y +
                 (int64_t)plane.nz * z -
-                ((int64_t)plane.distance_q4 << 10);
+                (int64_t)plane.distance_q4 * 1024;
             side = distance < 0 ? 1 : 0;
             node_index = read_i16(node + 4 + side * 2);
         }
@@ -721,7 +1128,7 @@ int c15_map_hull_contents(
             (int64_t)plane.nx * x +
             (int64_t)plane.ny * y +
             (int64_t)plane.nz * z -
-            ((int64_t)plane.distance_q4 << 10);
+            (int64_t)plane.distance_q4 * 1024;
         side = distance < 0 ? 1 : 0;
         node_index = read_i16(node + 4 + side * 2);
     }

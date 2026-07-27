@@ -20,6 +20,17 @@ int c15_map_hull_contents(
     return -1;
 }
 
+int c15_map_on_ladder(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
+)
+{
+    (void)map;
+    (void)x;
+    (void)y;
+    (void)z;
+    return 0;
+}
+
 int16_t c15_sin_q14(uint8_t angle)
 {
     (void)angle;

@@ -29,8 +29,6 @@ static bda_handle_t g_draw;
 static bda_handle_t g_draw_owner;
 static volatile uint16_t *g_direct_framebuffer;
 static int g_direct_framebuffer_rotate_180;
-static uint16_t g_scanout[RAW_SCREEN_WIDTH * RAW_SCREEN_HEIGHT]
-    __attribute__((aligned(4)));
 static uint32_t g_previous_input;
 static uint32_t g_touch_control;
 static uint32_t g_touch_pressed_pending;
@@ -419,6 +417,10 @@ static uint32_t hit_test(int x, int y)
             y < LITE_BUTTON_SCORE_Y + LITE_BUTTON_HEIGHT) {
             return LITE_INPUT_SCORE;
         }
+        if (y >= LITE_BUTTON_ALT_Y &&
+            y < LITE_BUTTON_ALT_Y + LITE_BUTTON_HEIGHT) {
+            return LITE_INPUT_ALT;
+        }
     }
     if (x < (int)LITE_DISPLAY_VIEW_WIDTH &&
         y < (int)LITE_DISPLAY_VIEW_HEIGHT) {
@@ -660,13 +662,8 @@ int lite_platform_present(const uint16_t *rgb565)
     if (!rgb565 || !g_direct_framebuffer || g_detached) {
         return 0;
     }
-    lite_display_copy_landscape_rgb565(
+    lite_display_present_landscape_rgb565(
         rgb565,
-        g_scanout,
-        0
-    );
-    lite_display_copy_portrait_rgb565(
-        g_scanout,
         g_direct_framebuffer,
         g_direct_framebuffer_rotate_180
     );

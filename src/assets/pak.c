@@ -6,7 +6,7 @@
 
 #define PAK_HEADER_BYTES 64u
 #define PAK_ENTRY_BYTES 64u
-#define PAK_ALIGNMENT 4096u
+#define PAK_ALIGNMENT 512u
 #define PAK_VERSION 2u
 #define PAK_ENDIAN 0x12345678u
 
@@ -38,6 +38,36 @@ static int names_equal(const char *left, const char *right)
     return *left == *right;
 }
 
+static int seek_absolute(const c15_pak_t *pak, uint32_t absolute)
+{
+    c15_pak_t *diagnostics = (c15_pak_t *)pak;
+    int position;
+    if (!pak || !bda_fs_file_is_valid(pak->file) ||
+        absolute > pak->file_size) {
+        return 0;
+    }
+    /*
+     * The 9588 FAT service is much more reliable when it traverses the
+     * shorter side of a large cluster chain. Assets in the upper half of
+     * the pack therefore seek backwards from EOF instead of walking more
+     * than 8 MiB from the beginning on every streamed read.
+     */
+    if (absolute > pak->file_size / 2u) {
+        position = bda_fs_seek_raw(
+            pak->file,
+            -(s32)(pak->file_size - absolute),
+            BDA_SEEK_END
+        );
+    } else {
+        position = bda_fs_seek_raw(
+            pak->file, (s32)absolute, BDA_SEEK_SET
+        );
+    }
+    diagnostics->last_seek_expected = absolute;
+    diagnostics->last_seek_result = position;
+    return position == (int)absolute;
+}
+
 static int read_entry_at(
     const c15_pak_t *pak,
     uint32_t index,
@@ -53,8 +83,7 @@ static int read_entry_at(
         return 0;
     }
     seek = pak->directory_offset + index * PAK_ENTRY_BYTES;
-    if (bda_fs_seek_raw(pak->file, (s32)seek, BDA_SEEK_SET) !=
-            (int)seek ||
+    if (!seek_absolute(pak, seek) ||
         bda_fs_read_raw(pak->file, record, sizeof(record)) !=
             (int)sizeof(record)) {
         return 0;
@@ -264,11 +293,14 @@ int c15_pak_read(
         return 0;
     }
     absolute = entry->offset + relative_offset;
-    if (bda_fs_seek_raw(pak->file, (s32)absolute, BDA_SEEK_SET) !=
-        (int)absolute) {
+    ((c15_pak_t *)pak)->last_read_expected = size;
+    ((c15_pak_t *)pak)->last_read_result = -2;
+    if (!seek_absolute(pak, absolute)) {
         return 0;
     }
-    return bda_fs_read_raw(pak->file, destination, size) == (int)size;
+    ((c15_pak_t *)pak)->last_read_result =
+        bda_fs_read_raw(pak->file, destination, size);
+    return pak->last_read_result == (int)size;
 }
 
 int c15_pak_validate_entry(

@@ -62,8 +62,13 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'tools\assetc.py') `
 Copy-Item `
     -LiteralPath (Join-Path $projectRoot 'tools\build-resource-pack.ps1') `
     -Destination (Join-Path $resourceStage 'tools\build-resource-pack.ps1')
+Copy-Item `
+    -LiteralPath (Join-Path $projectRoot 'tools\analyze-runtime-log.ps1') `
+    -Destination (Join-Path $resourceStage 'tools\analyze-runtime-log.ps1')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\formats.md') `
     -Destination (Join-Path $resourceStage 'docs\formats.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\PERFORMANCE.md') `
+    -Destination (Join-Path $resourceStage 'docs\PERFORMANCE.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'RESOURCE_PACK.md') `
     -Destination (Join-Path $resourceStage 'RESOURCE_PACK.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') `

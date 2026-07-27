@@ -434,6 +434,20 @@ class AssetFormatTests(unittest.TestCase):
                 "weapons/c4_explode1.wav",
                 "weapons/c4_disarm.wav",
                 "weapons/c4_disarmed.wav",
+                "player/pl_step1.wav",
+                "player/bhit_flesh-1.wav",
+                "player/headshot1.wav",
+                "player/die1.wav",
+                "weapons/ric1.wav",
+                "weapons/grenade_hit1.wav",
+                "weapons/hegrenade-1.wav",
+                "weapons/flashbang-1.wav",
+                "weapons/sg_explode.wav",
+                "hostage/hos1.wav",
+                "radio/ctwin.wav",
+                "radio/terwin.wav",
+                "items/kevlar.wav",
+                "player/pl_pain2.wav",
             ),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -444,10 +458,10 @@ class AssetFormatTests(unittest.TestCase):
                 with wave.open(str(target), "wb") as output:
                     output.setnchannels(1)
                     output.setsampwidth(1)
-                    output.setframerate(22050)
+                    output.setframerate(11025 if cue == 0 else 22050)
                     output.writeframes(bytes([128 + cue, 127 - cue]) * 16)
             chunk, detail = assetc.compile_sound_bank(cstrike)
-        self.assertEqual(detail["sample_rate"], 22050)
+        self.assertEqual(detail["sample_rate"], 11025)
         self.assertEqual(
             len(detail["cues"]), len(assetc.SOUND_CUE_SOURCES)
         )
@@ -456,6 +470,7 @@ class AssetFormatTests(unittest.TestCase):
             len(validated["cues"]), len(assetc.SOUND_CUE_SOURCES)
         )
         first_offset = validated["cues"][0]["offset"]
+        self.assertEqual(validated["cues"][0]["bytes"], 64)
         self.assertEqual(
             struct.unpack_from("<h", chunk, first_offset)[0], 0
         )
@@ -464,8 +479,73 @@ class AssetFormatTests(unittest.TestCase):
         ])
         deep = assetc.validate_pack(pack)
         self.assertEqual(
-            deep["entries"][0]["detail"]["sample_rate"], 22050
+            deep["entries"][0]["detail"]["sample_rate"], 11025
         )
+
+    def test_objective_zone_and_dynamic_entity_compilation(self):
+        entities = b"""
+        {
+        "classname" "hostage_entity"
+        "origin" "10 20 30"
+        }
+        {
+        "classname" "info_hostage_rescue"
+        "origin" "100 200 300"
+        }
+        {
+        "classname" "func_buyzone"
+        "model" "*1"
+        "team" "2"
+        }
+        {
+        "classname" "func_door"
+        "model" "*1"
+        "targetname" "front_door"
+        }
+        {
+        "classname" "func_button"
+        "origin" "32 48 64"
+        "target" "front_door"
+        }
+        """
+        models = [
+            (0, 0, 0, 0, 0, 0),
+            (-16, -32, -8, 16, 32, 72),
+        ]
+        hostage_data, hostages = assetc.compile_hostages(entities)
+        self.assertEqual(len(hostages), 1)
+        self.assertEqual(
+            assetc.HOSTAGE.unpack(hostage_data), (10, 20, 30)
+        )
+        rescue_data, rescues = assetc.compile_zones(
+            entities, models,
+            ("info_hostage_rescue",), "rescue", 128,
+        )
+        self.assertEqual(len(rescues), 1)
+        self.assertEqual(
+            assetc.ZONE.unpack(rescue_data),
+            (-28, 72, 172, 228, 328, 428, 0, 0),
+        )
+        buy_data, buys = assetc.compile_zones(
+            entities, models, ("func_buyzone",),
+            "buy", 160, True,
+        )
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(
+            assetc.ZONE.unpack(buy_data),
+            (-16, -32, -8, 16, 32, 72, 2, 0),
+        )
+        dynamic_data, dynamic = assetc.compile_dynamic_entities(
+            entities, models
+        )
+        self.assertEqual(len(dynamic), 2)
+        self.assertEqual(
+            len(dynamic_data), 2 * assetc.DYNAMIC_ENTITY.size
+        )
+        door = assetc.DYNAMIC_ENTITY.unpack_from(dynamic_data)
+        self.assertEqual(door[0], 1)
+        self.assertEqual(door[2], 1)
+        self.assertEqual(door[-1], assetc.fnv1a("front_door"))
 
 
 if __name__ == "__main__":

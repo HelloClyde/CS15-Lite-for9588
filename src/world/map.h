@@ -8,9 +8,10 @@
 #include "assets/pak.h"
 #include "core/memory.h"
 
-#define C15_MAP_MAX_SECTIONS 16u
-#define C15_MAP_MAX_TEXTURES 192u
-#define C15_MAP_VISIBLE_BYTES 1088u
+#define C15_MAP_MAX_SECTIONS 24u
+#define C15_MAP_MAX_TEXTURES 256u
+#define C15_MAP_VISIBLE_BYTES 1280u
+#define C15_MAP_MAX_DYNAMIC_ENTITIES 32u
 
 typedef struct c15_map_section {
     uint32_t type;
@@ -45,7 +46,29 @@ typedef struct c15_camera {
     int8_t pitch;
     uint16_t yaw_q8;
     int16_t pitch_q8;
+    uint16_t focal_length;
 } c15_camera_t;
+
+enum c15_dynamic_kind {
+    C15_DYNAMIC_DOOR = 1,
+    C15_DYNAMIC_BUTTON = 2,
+    C15_DYNAMIC_BREAKABLE = 3,
+    C15_DYNAMIC_PLATFORM = 4
+};
+
+typedef struct c15_dynamic_entity {
+    int16_t minimum_x;
+    int16_t minimum_y;
+    int16_t minimum_z;
+    int16_t maximum_x;
+    int16_t maximum_y;
+    int16_t maximum_z;
+    uint32_t target_hash;
+    uint32_t targetname_hash;
+    uint16_t model;
+    uint8_t kind;
+    uint8_t flags;
+} c15_dynamic_entity_t;
 
 typedef struct c15_surface {
     uint32_t first_vertex;
@@ -89,10 +112,20 @@ typedef struct c15_map {
     const c15_map_section_t *clip_section;
     const c15_map_section_t *model_section;
     const c15_map_section_t *bomb_site_section;
+    const c15_map_section_t *hostage_section;
+    const c15_map_section_t *rescue_zone_section;
+    const c15_map_section_t *buy_zone_section;
+    const c15_map_section_t *ladder_section;
+    const c15_map_section_t *dynamic_section;
     c15_texture_t textures[C15_MAP_MAX_TEXTURES];
     uint32_t texture_count;
     c15_camera_t spawn;
     uint32_t source_crc32;
+    uint32_t dynamic_open_bits;
+    uint32_t dynamic_broken_bits;
+    uint8_t dynamic_damage[C15_MAP_MAX_DYNAMIC_ENTITIES];
+    uint8_t dynamic_position[C15_MAP_MAX_DYNAMIC_ENTITIES];
+    uint8_t load_error;
     int loaded;
 } c15_map_t;
 
@@ -149,6 +182,40 @@ int c15_map_bomb_site(
     int32_t *y,
     int32_t *z
 );
+uint32_t c15_map_hostage_count(const c15_map_t *map);
+int c15_map_hostage(
+    const c15_map_t *map,
+    uint32_t index,
+    int32_t *x,
+    int32_t *y,
+    int32_t *z
+);
+int c15_map_in_rescue_zone(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
+);
+int c15_map_in_buy_zone(
+    const c15_map_t *map,
+    uint8_t team,
+    int32_t x,
+    int32_t y,
+    int32_t z
+);
+int c15_map_on_ladder(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
+);
+uint32_t c15_map_dynamic_count(const c15_map_t *map);
+int c15_map_dynamic(
+    const c15_map_t *map,
+    uint32_t index,
+    c15_dynamic_entity_t *entity
+);
+int c15_map_use_dynamic(
+    c15_map_t *map, int32_t x, int32_t y, int32_t z
+);
+int c15_map_damage_breakable(
+    c15_map_t *map, int32_t x, int32_t y, int32_t z
+);
+void c15_map_dynamic_tick(c15_map_t *map);
 int16_t c15_sin_q14(uint8_t angle);
 int16_t c15_cos_q14(uint8_t angle);
 

@@ -74,12 +74,33 @@ static void verify_contiguous_submit(void)
     }
 }
 
+static void verify_direct_submit(void)
+{
+    uint32_t index;
+    uint32_t y;
+    lite_display_copy_landscape_rgb565(source, scanout, 0);
+    lite_display_present_landscape_rgb565(source, destination, 0);
+    for (index = 0u;
+         index < DESTINATION_WIDTH * DESTINATION_HEIGHT; ++index) {
+        assert(destination[index] == scanout[index]);
+    }
+    lite_display_present_landscape_rgb565(source, destination, 1);
+    for (y = 0u; y < DESTINATION_HEIGHT; ++y) {
+        uint32_t x;
+        for (x = 0u; x < DESTINATION_WIDTH; ++x) {
+            assert(destination[y * DESTINATION_WIDTH + x] ==
+                   sample(y, SOURCE_HEIGHT - 1u - x));
+        }
+    }
+}
+
 int main(void)
 {
     fill_source();
     verify_ccw();
     verify_ccw_rotated_180();
     verify_contiguous_submit();
+    verify_direct_submit();
     puts("display_test: PASS");
     return 0;
 }

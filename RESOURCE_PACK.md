@@ -6,7 +6,7 @@ repository members who are authorized to use the source resources. Do not
 redistribute the pack or expose it through a public release. You can also build
 it locally from resources you are authorized to use.
 
-The source archive consumed by final M12 tag builds must include its SHA-256
+The source archive consumed by final M15 tag builds must include its SHA-256
 sidecar and use this layout:
 
 ```text
@@ -17,7 +17,8 @@ valve\halflife.wad
 ## Required sources
 
 - a Counter-Strike 1.5 `cstrike` directory containing `de_dust2.bsp`,
-  `cs_assault.bsp`, `cs_italy.bsp`, the 23 selected `v_*.mdl` files and their
+  `fy_iceworld.bsp`, `cs_assault.bsp`, `cs_italy.bsp`, `de_inferno.bsp`,
+  `de_nuke.bsp`, `cs_office.bsp`, the 23 selected `v_*.mdl` files and their
   weapon sounds;
 - the matching Half-Life `valve` directory containing `halflife.wad`.
 
@@ -36,7 +37,7 @@ $valve = 'D:\Games\Half-Life\valve'
 ```
 
 If `valve` is next to `cstrike`, the PowerShell wrapper discovers it
-automatically. `cs_assault` uses many Half-Life base textures, so a final M12
+automatically. `cs_assault` uses many Half-Life base textures, so a final M15
 pack must include `halflife.wad`. `-AllowMissing` remains available only for
 converter development; it emits visible 16x16 placeholders and must not be
 used for a release acceptance build.
@@ -57,6 +58,11 @@ Create this exact directory on the device and copy the generated pack:
 ```text
 A:\应用\数据\CS15LITE\CS15.C15PAK
 ```
+
+When upgrading, delete the old `CS15.C15PAK` before copying the replacement.
+The M15 seven-map pack is about 11 MB, and overwriting it in place can fail on
+a fragmented 9588 FAT volume even when the total free-space counter looks
+large enough.
 
 The BDA and pack must use the same runtime resource revision. An outdated
 pack is stopped before map loading.

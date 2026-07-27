@@ -77,7 +77,7 @@ int main(void)
     assert(fclose(output) == 0);
     free(file_data);
 
-    assert(sizeof(pak) <= 24u);
+    assert(sizeof(pak) <= 40u);
     assert(c15_pak_open(&pak, path));
     assert(pak.entry_count == 3u);
     for (index = 0u; index < 3u; ++index) {

@@ -56,6 +56,13 @@ $tests = @(
             (Join-Path $projectRoot 'tests\pak_test.c'),
             (Join-Path $projectRoot 'src\assets\pak.c')
         )
+    },
+    @{
+        Name = 'model_render_test'
+        Sources = @(
+            (Join-Path $projectRoot 'tests\model_render_test.c'),
+            (Join-Path $projectRoot 'src\render\model.c')
+        )
     }
 )
 

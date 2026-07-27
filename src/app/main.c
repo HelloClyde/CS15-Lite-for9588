@@ -17,12 +17,10 @@
 #define ASSET_PATH \
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\CS15LITE\\CS15.C15PAK"
 /*
- * M12 streams BSP visibility and stores compact nodes/leaves. Italy is the
- * largest map at 863632 resident BSP bytes; Assault is the largest texture
- * set at under 86 KB after offline 64-colour/32x32 world-texture reduction.
+ * The 320x240 RGB565 historical menu splash is the worst resident case at
+ * 153600 bytes. Office peaks just below 155 KB after offline reduction.
  */
-#define MAP_ARENA_BYTES 864000u
-#define TEXTURE_ARENA_BYTES 86000u
+#define TEXTURE_ARENA_BYTES 160000u
 /*
  * Player skins are prefiltered to 16x16 offline. This leaves both team
  * meshes, both held weapons and the largest animated view model below 64 KiB
@@ -36,11 +34,27 @@
 #define FIRE_FEEDBACK_MS 160u
 #define HIT_FEEDBACK_MS 140u
 #define ROUND_END_MS 2500u
+#define FREEZE_TIME_MS 5000u
 #define ROUND_TIME_MS 90000u
 #define BOMB_TIME_MS 35000u
 #define BOMB_PLANT_MS 3000u
 #define BOMB_DEFUSE_MS 5000u
 #define BOMB_USE_DISTANCE 144u
+#define BUY_TIME_MS 20000u
+#define HOSTAGE_MAX 4u
+#define GRENADE_MAX 6u
+#define CORPSE_MAX 8u
+#define IMPACT_MAX 8u
+#define DROPPED_WEAPON_MAX 12u
+#define WEAPON_PICKUP_DISTANCE 88u
+#define GRENADE_HE 0u
+#define GRENADE_FLASH 1u
+#define GRENADE_SMOKE 2u
+#define GRENADE_KIND_COUNT 3u
+#define HOSTAGE_FOLLOW_NONE 0xffu
+#define HOSTAGE_FOLLOW_PLAYER 0xfeu
+#define DEFAULT_FOCAL_LENGTH 160u
+#define ZOOM_FOCAL_LENGTH 280u
 #define BOT_COUNT 7u
 #define BOT_TEAMMATES 3u
 #define BOT_MOVE_PER_TICK 4u
@@ -68,10 +82,30 @@ enum bot_difficulty {
     BOT_DIFFICULTY_COUNT
 };
 
+enum bot_role {
+    BOT_ROLE_ENTRY,
+    BOT_ROLE_SUPPORT,
+    BOT_ROLE_ANCHOR
+};
+
+enum round_end_reason {
+    ROUND_REASON_NONE,
+    ROUND_REASON_ELIMINATION,
+    ROUND_REASON_TARGET_BOMBED,
+    ROUND_REASON_BOMB_DEFUSED,
+    ROUND_REASON_TARGET_SAVED,
+    ROUND_REASON_HOSTAGES_RESCUED,
+    ROUND_REASON_TIME_EXPIRED
+};
+
 enum map_id {
     MAP_DE_DUST2,
+    MAP_FY_ICEWORLD,
     MAP_CS_ASSAULT,
     MAP_CS_ITALY,
+    MAP_DE_INFERNO,
+    MAP_DE_NUKE,
+    MAP_CS_OFFICE,
     MAP_COUNT
 };
 
@@ -102,12 +136,37 @@ enum weapon_id {
     WEAPON_COUNT
 };
 
+enum weapon_slot {
+    WEAPON_SLOT_KNIFE,
+    WEAPON_SLOT_PISTOL,
+    WEAPON_SLOT_PRIMARY
+};
+
+enum buy_item {
+    BUY_ITEM_HE = WEAPON_COUNT,
+    BUY_ITEM_FLASH,
+    BUY_ITEM_SMOKE,
+    BUY_ITEM_ARMOR,
+    BUY_ITEM_HELMET,
+    BUY_ITEM_DEFUSE,
+    BUY_ITEM_AMMO,
+    BUY_ITEM_START,
+    BUY_ITEM_COUNT
+};
+
 typedef struct c15_bot {
     c15_player_t mover;
     uint32_t next_fire;
     uint32_t next_decision;
+    uint32_t flash_until;
+    uint32_t last_enemy_seen;
+    int32_t last_enemy_x;
+    int32_t last_enemy_y;
     uint16_t health;
     uint16_t aim_seed;
+    uint16_t armor;
+    uint16_t money;
+    uint16_t ammo;
     uint8_t team;
     uint8_t weapon;
     uint8_t alive;
@@ -122,6 +181,11 @@ typedef struct c15_bot {
     uint8_t bomb_carrier;
     uint8_t kills;
     uint8_t deaths;
+    uint8_t helmet;
+    uint8_t grenade;
+    uint8_t nav_lane;
+    uint8_t heard_shot;
+    uint8_t role;
 } c15_bot_t;
 
 enum bomb_action {
@@ -144,7 +208,69 @@ typedef struct c15_bomb_state {
     uint8_t site;
     uint8_t action;
     uint8_t action_owner;
+    uint8_t dropped;
 } c15_bomb_state_t;
+
+typedef struct c15_hostage {
+    c15_player_t mover;
+    uint16_t health;
+    uint8_t active;
+    uint8_t rescued;
+    uint8_t follower;
+    uint8_t moving;
+} c15_hostage_t;
+
+typedef struct c15_grenade {
+    int32_t x_q8;
+    int32_t y_q8;
+    int32_t z_q8;
+    int32_t vx_q8;
+    int32_t vy_q8;
+    int32_t vz_q8;
+    uint32_t detonate_at;
+    uint8_t kind;
+    uint8_t owner_team;
+    uint8_t owner;
+    uint8_t active;
+    uint8_t bounced;
+} c15_grenade_t;
+
+typedef struct c15_corpse {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint32_t died_at;
+    uint8_t team;
+    uint8_t active;
+} c15_corpse_t;
+
+typedef struct c15_impact {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint32_t until;
+    uint8_t kind;
+    uint8_t active;
+} c15_impact_t;
+
+typedef struct c15_dropped_weapon {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint32_t dropped_at;
+    uint16_t ammo;
+    uint16_t reserve;
+    uint8_t weapon;
+    uint8_t active;
+} c15_dropped_weapon_t;
+
+typedef struct c15_kill_feed {
+    uint32_t until;
+    uint8_t killer;
+    uint8_t victim;
+    uint8_t weapon;
+    uint8_t headshot;
+} c15_kill_feed_t;
 
 typedef struct c15_nav_point_3d {
     int16_t x;
@@ -166,20 +292,41 @@ typedef struct c15_muzzle_sprite {
 
 static const char *const g_map_assets[MAP_COUNT] = {
     "maps/de_dust2",
+    "maps/fy_iceworld",
     "maps/cs_assault",
-    "maps/cs_italy"
+    "maps/cs_italy",
+    "maps/de_inferno",
+    "maps/de_nuke",
+    "maps/cs_office"
 };
 
 static const char *const g_map_labels[MAP_COUNT] = {
     "DE_DUST2",
+    "FY_ICEWORLD",
     "CS_ASSAULT",
-    "CS_ITALY"
+    "CS_ITALY",
+    "DE_INFERNO",
+    "DE_NUKE",
+    "CS_OFFICE"
 };
 
 static const char *const g_map_loading[MAP_COUNT] = {
     "LOADING DE_DUST2 + PLAYERS",
+    "LOADING FY_ICEWORLD + PLAYERS",
     "LOADING CS_ASSAULT + PLAYERS",
-    "LOADING CS_ITALY + PLAYERS"
+    "LOADING CS_ITALY + PLAYERS",
+    "LOADING DE_INFERNO + PLAYERS",
+    "LOADING DE_NUKE + PLAYERS",
+    "LOADING CS_OFFICE + PLAYERS"
+};
+
+/*
+ * BSP visibility stays streamed from the pack. Only resident sections are
+ * allocated, and only for the selected map, so small maps do not pay the
+ * 1.08 MiB Office peak. Values include section-alignment headroom.
+ */
+static const uint32_t g_map_arena_bytes[MAP_COUNT] = {
+    620000u, 36000u, 360000u, 880000u, 800000u, 848000u, 1088000u
 };
 
 /*
@@ -211,18 +358,55 @@ static const c15_nav_point_3d_t g_italy_route[] = {
     { 640, 1888,  37}, { 320, 2112,  37}
 };
 
+static const c15_nav_point_3d_t g_iceworld_route[] = {
+    { 128,   64,-195}, { 128, -192,-195}, { 128, -448,-195},
+    { 256, -672,-195}, { 512, -896,-195}, { 512,-1216,-195}
+};
+
+static const c15_nav_point_3d_t g_inferno_route[] = {
+    {2400,2208,125}, {2304,1728,125}, {2208,1216,125},
+    {2024, 376,189}, {1472, 416,125}, { 832, 512, 93},
+    { 192, 640, 61}, {-512, 736, -3}, {-1088, 800,-19},
+    {-1664, 720,-19}
+};
+
+static const c15_nav_point_3d_t g_nuke_route[] = {
+    {3216,-528,-311}, {2688,-576,-311}, {2144,-640,-311},
+    {1600,-704,-311}, {1088,-736,-343}, { 680,-776,-371},
+    { 128,-832,-371}, {-512,-896,-371}, {-1280,-960,-371},
+    {-2080,-1024,-371}, {-2720,-1088,-371}
+};
+
+static const c15_nav_point_3d_t g_office_route[] = {
+    {-1064,-1496,-303}, {-896,-1152,-303}, {-640,-832,-251},
+    {-384,-512,-219}, { -64,-256,-187}, { 320, -64,-155},
+    { 704, 128,-127}, {1152, 328,-127}, {1536, 472,-127}
+};
+
 #define DUST2_ROUTE_COUNT \
     ((uint32_t)(sizeof(g_dust2_route) / sizeof(g_dust2_route[0])))
 #define ASSAULT_ROUTE_COUNT \
     ((uint32_t)(sizeof(g_assault_route) / sizeof(g_assault_route[0])))
 #define ITALY_ROUTE_COUNT \
     ((uint32_t)(sizeof(g_italy_route) / sizeof(g_italy_route[0])))
+#define ICEWORLD_ROUTE_COUNT \
+    ((uint32_t)(sizeof(g_iceworld_route) / sizeof(g_iceworld_route[0])))
+#define INFERNO_ROUTE_COUNT \
+    ((uint32_t)(sizeof(g_inferno_route) / sizeof(g_inferno_route[0])))
+#define NUKE_ROUTE_COUNT \
+    ((uint32_t)(sizeof(g_nuke_route) / sizeof(g_nuke_route[0])))
+#define OFFICE_ROUTE_COUNT \
+    ((uint32_t)(sizeof(g_office_route) / sizeof(g_office_route[0])))
 
 static uint32_t map_route_count(uint32_t map_id)
 {
     if (map_id == MAP_DE_DUST2) return DUST2_ROUTE_COUNT;
+    if (map_id == MAP_FY_ICEWORLD) return ICEWORLD_ROUTE_COUNT;
     if (map_id == MAP_CS_ASSAULT) return ASSAULT_ROUTE_COUNT;
-    return ITALY_ROUTE_COUNT;
+    if (map_id == MAP_CS_ITALY) return ITALY_ROUTE_COUNT;
+    if (map_id == MAP_DE_INFERNO) return INFERNO_ROUTE_COUNT;
+    if (map_id == MAP_DE_NUKE) return NUKE_ROUTE_COUNT;
+    return OFFICE_ROUTE_COUNT;
 }
 
 static int map_route_point(
@@ -239,6 +423,12 @@ static int map_route_point(
         *z = g_dust2_route[index].z;
         return 1;
     }
+    if (map_id == MAP_FY_ICEWORLD && index < ICEWORLD_ROUTE_COUNT) {
+        *x = g_iceworld_route[index].x;
+        *y = g_iceworld_route[index].y;
+        *z = g_iceworld_route[index].z;
+        return 1;
+    }
     if (map_id == MAP_CS_ASSAULT && index < ASSAULT_ROUTE_COUNT) {
         *x = g_assault_route[index].x;
         *y = g_assault_route[index].y;
@@ -251,12 +441,68 @@ static int map_route_point(
         *z = g_italy_route[index].z;
         return 1;
     }
+    if (map_id == MAP_DE_INFERNO && index < INFERNO_ROUTE_COUNT) {
+        *x = g_inferno_route[index].x;
+        *y = g_inferno_route[index].y;
+        *z = g_inferno_route[index].z;
+        return 1;
+    }
+    if (map_id == MAP_DE_NUKE && index < NUKE_ROUTE_COUNT) {
+        *x = g_nuke_route[index].x;
+        *y = g_nuke_route[index].y;
+        *z = g_nuke_route[index].z;
+        return 1;
+    }
+    if (map_id == MAP_CS_OFFICE && index < OFFICE_ROUTE_COUNT) {
+        *x = g_office_route[index].x;
+        *y = g_office_route[index].y;
+        *z = g_office_route[index].z;
+        return 1;
+    }
     return 0;
 }
 
+static int map_route_lane_point(
+    uint32_t map_id,
+    uint8_t index,
+    uint8_t lane,
+    int32_t *x,
+    int32_t *y,
+    int32_t *z
+)
+{
+    int32_t previous_x;
+    int32_t previous_y;
+    int32_t previous_z;
+    int32_t offset;
+    int32_t route_dx;
+    int32_t route_dy;
+    if (!map_route_point(map_id, index, x, y, z)) {
+        return 0;
+    }
+    if (lane == 1u || index == 0u ||
+        !map_route_point(
+            map_id, (uint8_t)(index - 1u),
+            &previous_x, &previous_y, &previous_z)) {
+        return 1;
+    }
+    (void)previous_z;
+    offset = lane == 0u ? -56 : 56;
+    route_dx = *x - previous_x;
+    route_dy = *y - previous_y;
+    if (route_dx < 0) route_dx = -route_dx;
+    if (route_dy < 0) route_dy = -route_dy;
+    if (route_dx >= route_dy) {
+        *y += offset;
+    } else {
+        *x += offset;
+    }
+    return 1;
+}
+
 static uint16_t g_screen[LITE_SCREEN_WIDTH * LITE_SCREEN_HEIGHT];
-static uint16_t g_depth[LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT];
-static uint8_t g_map_memory[MAP_ARENA_BYTES];
+static uint16_t g_depth[LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT]
+    __attribute__((aligned(4)));
 static uint8_t g_texture_memory[TEXTURE_ARENA_BYTES];
 static uint8_t g_model_memory[MODEL_ARENA_BYTES];
 static uint8_t g_load_scratch[LOAD_SCRATCH_BYTES]
@@ -418,7 +664,7 @@ static int resource_pack_is_current(uint32_t map_id)
     };
     uint32_t index;
     int complete = resource_pack_has(
-        "meta/m12", C15_FOURCC('V','E','R','0')
+        "meta/m15", C15_FOURCC('V','E','R','0')
     );
     if (!resource_pack_has(
             "sound/game", C15_FOURCC('S','N','D','0'))) {
@@ -479,7 +725,7 @@ static const uint16_t g_weapon_interval_ms[WEAPON_COUNT] = {
 };
 
 static const uint8_t g_weapon_damage[WEAPON_COUNT] = {
-    50u, 25u, 30u, 32u, 54u, 26u, 25u, 72u, 62u, 29u, 23u,
+    50u, 25u, 30u, 32u, 54u, 26u, 25u, 26u, 20u, 29u, 23u,
     26u, 30u, 25u, 36u, 34u, 33u, 32u, 75u, 100u, 60u, 65u,
     32u
 };
@@ -490,9 +736,130 @@ static const uint16_t g_weapon_price[WEAPON_COUNT] = {
     3500u, 2750u, 4750u, 5000u, 4200u, 5750u
 };
 
+static const char *const g_equipment_labels[
+    BUY_ITEM_COUNT - WEAPON_COUNT
+] = {
+    "HE GRENADE", "FLASHBANG", "SMOKE",
+    "KEVLAR", "KEVLAR+HELMET", "DEFUSE KIT", "AMMO", "START ROUND"
+};
+
+static const uint16_t g_equipment_price[
+    BUY_ITEM_COUNT - WEAPON_COUNT
+] = {
+    300u, 200u, 300u, 650u, 1000u, 200u, 300u, 0u
+};
+
+static uint32_t equipment_price(
+    uint32_t item, uint16_t player_armor
+)
+{
+    if (item == BUY_ITEM_HELMET && player_armor != 0u) {
+        return 350u;
+    }
+    return g_equipment_price[item - WEAPON_COUNT];
+}
+
 static const uint8_t g_weapon_automatic[WEAPON_COUNT] = {
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 1u, 1u,
     1u, 1u, 1u, 1u, 1u, 1u, 0u, 0u, 1u, 1u, 1u
+};
+
+static const uint8_t g_weapon_slot[WEAPON_COUNT] = {
+    [WEAPON_KNIFE] = WEAPON_SLOT_KNIFE,
+    [WEAPON_GLOCK] = WEAPON_SLOT_PISTOL,
+    [WEAPON_USP] = WEAPON_SLOT_PISTOL,
+    [WEAPON_P228] = WEAPON_SLOT_PISTOL,
+    [WEAPON_DEAGLE] = WEAPON_SLOT_PISTOL,
+    [WEAPON_ELITE] = WEAPON_SLOT_PISTOL,
+    [WEAPON_FIVESEVEN] = WEAPON_SLOT_PISTOL,
+    [WEAPON_M3] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_XM1014] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_MAC10] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_TMP] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_MP5] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_UMP45] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_P90] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_AK47] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_SG552] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_M4A1] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_AUG] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_SCOUT] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_AWP] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_G3SG1] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_SG550] = WEAPON_SLOT_PRIMARY,
+    [WEAPON_M249] = WEAPON_SLOT_PRIMARY
+};
+
+/* 0 = both teams, 1 = Terrorist, 2 = Counter-Terrorist. */
+static const uint8_t g_weapon_team[WEAPON_COUNT] = {
+    [WEAPON_GLOCK] = TEAM_T,
+    [WEAPON_USP] = TEAM_CT,
+    [WEAPON_ELITE] = TEAM_T,
+    [WEAPON_FIVESEVEN] = TEAM_CT,
+    [WEAPON_MAC10] = TEAM_T,
+    [WEAPON_TMP] = TEAM_CT,
+    [WEAPON_AK47] = TEAM_T,
+    [WEAPON_SG552] = TEAM_T,
+    [WEAPON_M4A1] = TEAM_CT,
+    [WEAPON_AUG] = TEAM_CT,
+    [WEAPON_G3SG1] = TEAM_T,
+    [WEAPON_SG550] = TEAM_CT
+};
+
+static const uint16_t g_weapon_reserve_max[WEAPON_COUNT] = {
+    0u, 120u, 100u, 52u, 35u, 120u, 100u, 32u, 32u,
+    100u, 120u, 120u, 100u, 100u, 90u, 90u, 90u, 90u,
+    90u, 30u, 90u, 90u, 200u
+};
+
+/* Angular spread and recoil use the camera's Q8-angle representation. */
+static const uint16_t g_weapon_spread_q8[WEAPON_COUNT] = {
+    0u, 130u, 100u, 115u, 85u, 150u, 105u, 820u, 700u,
+    165u, 150u, 125u, 145u, 140u, 100u, 95u, 88u, 92u,
+    70u, 64u, 80u, 78u, 150u
+};
+
+static const uint16_t g_weapon_recoil_q8[WEAPON_COUNT] = {
+    0u, 85u, 70u, 75u, 145u, 65u, 68u, 180u, 145u,
+    42u, 38u, 40u, 46u, 34u, 58u, 52u, 46u, 50u,
+    110u, 190u, 78u, 76u, 48u
+};
+
+static const uint8_t g_weapon_pellets[WEAPON_COUNT] = {
+    [WEAPON_KNIFE] = 1u,
+    [WEAPON_GLOCK] = 1u, [WEAPON_USP] = 1u,
+    [WEAPON_P228] = 1u, [WEAPON_DEAGLE] = 1u,
+    [WEAPON_ELITE] = 1u, [WEAPON_FIVESEVEN] = 1u,
+    [WEAPON_M3] = 9u, [WEAPON_XM1014] = 7u,
+    [WEAPON_MAC10] = 1u, [WEAPON_TMP] = 1u,
+    [WEAPON_MP5] = 1u, [WEAPON_UMP45] = 1u,
+    [WEAPON_P90] = 1u, [WEAPON_AK47] = 1u,
+    [WEAPON_SG552] = 1u, [WEAPON_M4A1] = 1u,
+    [WEAPON_AUG] = 1u, [WEAPON_SCOUT] = 1u,
+    [WEAPON_AWP] = 1u, [WEAPON_G3SG1] = 1u,
+    [WEAPON_SG550] = 1u, [WEAPON_M249] = 1u
+};
+
+static const uint8_t g_weapon_penetration[WEAPON_COUNT] = {
+    [WEAPON_DEAGLE] = 1u,
+    [WEAPON_MP5] = 1u,
+    [WEAPON_UMP45] = 1u,
+    [WEAPON_AK47] = 2u,
+    [WEAPON_SG552] = 2u,
+    [WEAPON_M4A1] = 2u,
+    [WEAPON_AUG] = 2u,
+    [WEAPON_SCOUT] = 1u,
+    [WEAPON_AWP] = 3u,
+    [WEAPON_G3SG1] = 2u,
+    [WEAPON_SG550] = 2u,
+    [WEAPON_M249] = 2u
+};
+
+/* Damage retained for every 500 map units. */
+static const uint16_t g_weapon_range_modifier_q8[WEAPON_COUNT] = {
+    256u, 244u, 245u, 240u, 244u, 242u, 240u, 225u, 228u,
+    238u, 236u, 240u, 240u, 238u, 248u, 246u, 248u, 248u,
+    250u, 252u, 246u, 246u, 238u
 };
 
 static const c15_model_view_t g_weapon_views[WEAPON_COUNT] = {
@@ -649,11 +1016,15 @@ static void draw_button(
     );
 }
 
-static void draw_controls(lite_framebuffer_t *fb, const lite_input_t *input)
+static void draw_controls(
+    lite_framebuffer_t *fb,
+    const lite_input_t *input,
+    const char *alt_label
+)
 {
     draw_button(
         fb, LITE_BUTTON_X, LITE_BUTTON_USE_Y,
-        LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "BUY",
+        LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "USE",
         (input->down & LITE_INPUT_USE) != 0u
     );
     draw_button(
@@ -681,6 +1052,11 @@ static void draw_controls(lite_framebuffer_t *fb, const lite_input_t *input)
         LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "SCORE",
         (input->down & LITE_INPUT_SCORE) != 0u
     );
+    draw_button(
+        fb, LITE_BUTTON_X, LITE_BUTTON_ALT_Y,
+        LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, alt_label,
+        (input->down & LITE_INPUT_ALT) != 0u
+    );
 }
 
 static void draw_fps(
@@ -696,6 +1072,25 @@ static void draw_fps(
     lite_fb_u32(fb, value_x, 4, whole, 1, value_color);
     lite_fb_text(fb, dot_x, 4, ".", 1, value_color);
     lite_fb_u32(fb, dot_x + 6, 4, fps_x10 % 10u, 1, value_color);
+}
+
+static const char *weapon_alt_label(
+    uint32_t weapon, int zoomed, int silenced, int glock_burst
+)
+{
+    if (weapon == WEAPON_KNIFE) return "STAB";
+    if (weapon == WEAPON_GLOCK) {
+        return glock_burst ? "BURST" : "SEMI";
+    }
+    if (weapon == WEAPON_USP || weapon == WEAPON_M4A1) {
+        return silenced ? "SILENT" : "LOUD";
+    }
+    if (weapon == WEAPON_SG552 || weapon == WEAPON_AUG ||
+        weapon == WEAPON_SCOUT || weapon == WEAPON_AWP ||
+        weapon == WEAPON_G3SG1 || weapon == WEAPON_SG550) {
+        return zoomed ? "ZOOM" : "SCOPE";
+    }
+    return "GRENADE";
 }
 
 static void draw_menu_chrome(
@@ -799,15 +1194,31 @@ static void draw_options_menu(
     draw_button(fb, 34, 172, 184, 28, "BACK", selection == 2u);
 }
 
+static uint32_t map_window_start(uint32_t selection)
+{
+    uint32_t total = MAP_COUNT + 1u;
+    uint32_t start = selection > 2u ? selection - 2u : 0u;
+    if (start + 5u > total) {
+        start = total - 5u;
+    }
+    return start;
+}
+
 static void draw_map_menu(lite_framebuffer_t *fb, uint32_t selection)
 {
     uint16_t pale = lite_rgb565(211u, 214u, 190u);
+    uint32_t start = map_window_start(selection);
+    uint32_t row;
     draw_menu_chrome(fb, "CREATE GAME - SELECT MAP");
     lite_fb_text(fb, 35, 68, "AVAILABLE MAPS", 1, pale);
-    draw_button(fb, 34, 84, 176, 27, "DE_DUST2", selection == 0u);
-    draw_button(fb, 34, 116, 176, 27, "CS_ASSAULT", selection == 1u);
-    draw_button(fb, 34, 148, 176, 27, "CS_ITALY", selection == 2u);
-    draw_button(fb, 34, 188, 176, 25, "BACK", selection == 3u);
+    for (row = 0u; row < 5u; ++row) {
+        uint32_t item = start + row;
+        draw_button(
+            fb, 34, 82 + (int)row * 27, 176, 24,
+            item == MAP_COUNT ? "BACK" : g_map_labels[item],
+            selection == item
+        );
+    }
 }
 
 static void draw_team_menu(lite_framebuffer_t *fb, uint32_t selection)
@@ -836,7 +1247,7 @@ static void draw_loading(
 
 static uint32_t buy_window_start(uint32_t selection)
 {
-    uint32_t total = WEAPON_COUNT + 1u;
+    uint32_t total = BUY_ITEM_COUNT;
     uint32_t start = selection > 2u ? selection - 2u : 0u;
     if (start + 5u > total) {
         start = total - 5u;
@@ -848,7 +1259,9 @@ static void draw_buy_menu(
     lite_framebuffer_t *fb,
     uint32_t money,
     uint32_t selection,
-    const uint8_t owned[WEAPON_COUNT]
+    const uint8_t owned[WEAPON_COUNT],
+    uint8_t player_team,
+    uint16_t player_armor
 )
 {
     uint16_t pale = lite_rgb565(211u, 214u, 190u);
@@ -861,21 +1274,40 @@ static void draw_buy_menu(
     for (row = 0u; row < 5u; ++row) {
         uint32_t item = start + row;
         int y = 88 + (int)row * 27;
-        if (item == WEAPON_COUNT) {
+        if (item == BUY_ITEM_START) {
             draw_button(
                 fb, 28, y, 194, 23, "START ROUND",
                 selection == item
             );
-        } else {
+        } else if (item < WEAPON_COUNT) {
             draw_button(
                 fb, 28, y, 158, 23, g_weapon_labels[item],
                 selection == item
             );
-            if (owned[item]) {
+            if (g_weapon_team[item] != 0u &&
+                g_weapon_team[item] != player_team) {
+                lite_fb_text(fb, 192, y + 8, "LOCK", 1, pale);
+            } else if (owned[item]) {
                 lite_fb_text(fb, 192, y + 8, "OWN", 1, gold);
             } else {
                 lite_fb_u32(
                     fb, 192, y + 8, g_weapon_price[item], 1, pale
+                );
+            }
+        } else {
+            uint32_t equipment = item - WEAPON_COUNT;
+            draw_button(
+                fb, 28, y, 158, 23,
+                g_equipment_labels[equipment],
+                selection == item
+            );
+            if (item == BUY_ITEM_DEFUSE &&
+                player_team != TEAM_CT) {
+                lite_fb_text(fb, 192, y + 8, "LOCK", 1, pale);
+            } else {
+                lite_fb_u32(
+                    fb, 192, y + 8,
+                    equipment_price(item, player_armor), 1, pale
                 );
             }
         }
@@ -1008,6 +1440,238 @@ static void change_weapon(
         bda_memset(&g_view_animation, 0, sizeof(g_view_animation));
         bda_memset(&g_muzzle, 0, sizeof(g_muzzle));
     }
+}
+
+static int weapon_allowed_for_team(uint32_t weapon, uint8_t team)
+{
+    return weapon < WEAPON_COUNT &&
+        (g_weapon_team[weapon] == 0u ||
+         g_weapon_team[weapon] == team);
+}
+
+static void own_weapon_in_slot(
+    uint8_t owned[WEAPON_COUNT], uint32_t weapon
+)
+{
+    uint32_t index;
+    uint8_t slot = g_weapon_slot[weapon];
+    for (index = 0u; index < WEAPON_COUNT; ++index) {
+        if (index != WEAPON_KNIFE && g_weapon_slot[index] == slot) {
+            owned[index] = 0u;
+        }
+    }
+    owned[weapon] = 1u;
+}
+
+static uint32_t owned_weapon_in_slot(
+    const uint8_t owned[WEAPON_COUNT], uint8_t slot
+)
+{
+    uint32_t index;
+    for (index = 0u; index < WEAPON_COUNT; ++index) {
+        if (owned[index] && g_weapon_slot[index] == slot) {
+            return index;
+        }
+    }
+    return WEAPON_COUNT;
+}
+
+static void drop_weapon(
+    c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX],
+    uint32_t weapon,
+    uint16_t ammo,
+    uint16_t reserve,
+    int32_t x,
+    int32_t y,
+    int32_t z,
+    uint32_t now
+)
+{
+    uint32_t index;
+    uint32_t selected = DROPPED_WEAPON_MAX;
+    uint32_t oldest = 0xffffffffu;
+    if (weapon == WEAPON_KNIFE || weapon >= WEAPON_COUNT) {
+        return;
+    }
+    for (index = 0u; index < DROPPED_WEAPON_MAX; ++index) {
+        if (!dropped[index].active) {
+            selected = index;
+            break;
+        }
+        if (dropped[index].dropped_at < oldest) {
+            oldest = dropped[index].dropped_at;
+            selected = index;
+        }
+    }
+    dropped[selected].x = x;
+    dropped[selected].y = y;
+    dropped[selected].z = z;
+    dropped[selected].dropped_at = now;
+    dropped[selected].ammo = ammo;
+    dropped[selected].reserve = reserve;
+    dropped[selected].weapon = (uint8_t)weapon;
+    dropped[selected].active = 1u;
+}
+
+static int pickup_weapon(
+    c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX],
+    const c15_player_t *player,
+    uint8_t owned[WEAPON_COUNT],
+    uint16_t ammo[WEAPON_COUNT],
+    uint16_t reserve[WEAPON_COUNT],
+    uint32_t *weapon,
+    uint32_t now
+)
+{
+    uint32_t index;
+    uint32_t selected = DROPPED_WEAPON_MAX;
+    uint32_t nearest = 0xffffffffu;
+    c15_dropped_weapon_t pickup;
+    uint32_t replaced;
+    for (index = 0u; index < DROPPED_WEAPON_MAX; ++index) {
+        uint32_t distance;
+        if (!dropped[index].active ||
+            abs_i32(dropped[index].z - player->z) > 80u) {
+            continue;
+        }
+        distance = distance_squared(
+            player->x, player->y,
+            dropped[index].x, dropped[index].y
+        );
+        if (distance <= WEAPON_PICKUP_DISTANCE *
+                        WEAPON_PICKUP_DISTANCE &&
+            distance < nearest) {
+            nearest = distance;
+            selected = index;
+        }
+    }
+    if (selected == DROPPED_WEAPON_MAX) {
+        return 0;
+    }
+    pickup = dropped[selected];
+    dropped[selected].active = 0u;
+    replaced = owned_weapon_in_slot(
+        owned, g_weapon_slot[pickup.weapon]
+    );
+    if (replaced < WEAPON_COUNT && replaced != pickup.weapon) {
+        drop_weapon(
+            dropped, replaced, ammo[replaced], reserve[replaced],
+            player->x, player->y, player->z, now
+        );
+        owned[replaced] = 0u;
+        ammo[replaced] = 0u;
+        reserve[replaced] = 0u;
+    }
+    own_weapon_in_slot(owned, pickup.weapon);
+    ammo[pickup.weapon] = pickup.ammo != 0u ?
+        pickup.ammo : g_weapon_capacity[pickup.weapon];
+    reserve[pickup.weapon] = pickup.reserve;
+    *weapon = pickup.weapon;
+    return 1;
+}
+
+static uint8_t next_spectator_target(
+    const c15_bot_t bots[BOT_COUNT],
+    uint8_t player_team,
+    uint8_t current
+)
+{
+    uint32_t pass;
+    for (pass = 0u; pass < 2u; ++pass) {
+        uint32_t step;
+        for (step = 1u; step <= BOT_COUNT; ++step) {
+            uint32_t index = current == 0xffu ?
+                step - 1u : ((uint32_t)current + step) % BOT_COUNT;
+            if (bots[index].alive &&
+                (pass != 0u || bots[index].team == player_team)) {
+                return (uint8_t)index;
+            }
+        }
+    }
+    return 0xffu;
+}
+
+static void spectator_camera(
+    c15_camera_t *camera,
+    const c15_bot_t bots[BOT_COUNT],
+    uint8_t target
+)
+{
+    if (target >= BOT_COUNT || !bots[target].alive) {
+        return;
+    }
+    c15_player_camera(&bots[target].mover, camera);
+    camera->focal_length = DEFAULT_FOCAL_LENGTH;
+}
+
+static void bot_pickup_weapons(
+    c15_bot_t bots[BOT_COUNT],
+    c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX]
+)
+{
+    uint32_t bot_index;
+    for (bot_index = 0u; bot_index < BOT_COUNT; ++bot_index) {
+        uint32_t drop_index;
+        c15_bot_t *bot = &bots[bot_index];
+        if (!bot->alive) continue;
+        for (drop_index = 0u;
+             drop_index < DROPPED_WEAPON_MAX; ++drop_index) {
+            c15_dropped_weapon_t *item = &dropped[drop_index];
+            if (!item->active ||
+                g_weapon_slot[item->weapon] != WEAPON_SLOT_PRIMARY ||
+                abs_i32(item->z - bot->mover.z) > 80u ||
+                distance_squared(
+                    item->x, item->y,
+                    bot->mover.x, bot->mover.y
+                ) > 64u * 64u) {
+                continue;
+            }
+            {
+                c15_dropped_weapon_t pickup = *item;
+                item->active = 0u;
+            drop_weapon(
+                dropped, bot->weapon, bot->ammo,
+                g_weapon_reserve_max[bot->weapon] / 2u,
+                bot->mover.x, bot->mover.y, bot->mover.z,
+                pickup.dropped_at + 1u
+            );
+            bot->weapon = pickup.weapon;
+            bot->ammo = pickup.ammo != 0u ?
+                pickup.ammo : g_weapon_capacity[pickup.weapon];
+            }
+            break;
+        }
+    }
+}
+
+static uint32_t dropped_weapon_count(
+    const c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX]
+)
+{
+    uint32_t index;
+    uint32_t count = 0u;
+    for (index = 0u; index < DROPPED_WEAPON_MAX; ++index) {
+        if (dropped[index].active) ++count;
+    }
+    return count;
+}
+
+static void complete_reload(
+    uint32_t weapon,
+    uint16_t clips[WEAPON_COUNT],
+    uint16_t reserve[WEAPON_COUNT]
+)
+{
+    uint16_t need;
+    uint16_t transfer;
+    if (weapon == WEAPON_KNIFE ||
+        clips[weapon] >= g_weapon_capacity[weapon]) {
+        return;
+    }
+    need = (uint16_t)(g_weapon_capacity[weapon] - clips[weapon]);
+    transfer = reserve[weapon] < need ? reserve[weapon] : need;
+    clips[weapon] = (uint16_t)(clips[weapon] + transfer);
+    reserve[weapon] = (uint16_t)(reserve[weapon] - transfer);
 }
 
 static void start_view_animation(
@@ -1155,36 +1819,79 @@ static int load_game_resources(
             &g_map, &g_pak, g_map_assets[map_id],
             map_arena, texture_arena,
             g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: map");
+        lite_log_u32("map_load_error", g_map.load_error);
+        lite_log_u32(
+            "pak_seek_expected", g_pak.last_seek_expected
+        );
+        lite_log_i32("pak_seek_result", g_pak.last_seek_result);
+        lite_log_u32(
+            "pak_read_expected", g_pak.last_read_expected
+        );
+        lite_log_i32("pak_read_result", g_pak.last_read_result);
+        lite_log_u32("map_arena_used", (uint32_t)map_arena->used);
+        lite_log_u32(
+            "map_arena_failures", (uint32_t)map_arena->failures
+        );
+        lite_log_u32(
+            "texture_arena_used", (uint32_t)texture_arena->used
+        );
+        lite_log_u32(
+            "texture_arena_failures",
+            (uint32_t)texture_arena->failures
+        );
         return 0;
     }
     if (!c15_model_load(
             &g_t_model, &g_pak, "mdl/player_terror",
-            model_arena, g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_load(
+            model_arena, g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: mdl/player_terror");
+        return 0;
+    }
+    if (!c15_model_load(
             &g_ct_model, &g_pak, "mdl/player_urban",
-            model_arena, g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_load(
+            model_arena, g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: mdl/player_urban");
+        return 0;
+    }
+    if (!c15_model_load(
             &g_t_weapon_model, &g_pak, "mdl/p_ak47",
-            model_arena, g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_load(
+            model_arena, g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: mdl/p_ak47");
+        return 0;
+    }
+    if (!c15_model_load(
             &g_ct_weapon_model, &g_pak, "mdl/p_m4a1",
-            model_arena, g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_locomotion_open(
+            model_arena, g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: mdl/p_m4a1");
+        return 0;
+    }
+    if (!c15_model_locomotion_open(
             &g_t_locomotion, &g_t_model, &g_pak,
             "anim/player_terror",
-            g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_locomotion_open(
+            g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: anim/player_terror");
+        return 0;
+    }
+    if (!c15_model_locomotion_open(
             &g_ct_locomotion, &g_ct_model, &g_pak,
             "anim/player_urban",
-            g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_locomotion_open(
+            g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: anim/player_urban");
+        return 0;
+    }
+    if (!c15_model_locomotion_open(
             &g_t_weapon_locomotion, &g_t_weapon_model, &g_pak,
             "anim/p_ak47",
-            g_load_scratch, sizeof(g_load_scratch)) ||
-        !c15_model_locomotion_open(
+            g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: anim/p_ak47");
+        return 0;
+    }
+    if (!c15_model_locomotion_open(
             &g_ct_weapon_locomotion, &g_ct_weapon_model, &g_pak,
             "anim/p_m4a1",
             g_load_scratch, sizeof(g_load_scratch))) {
+        lite_log_line("load failed: anim/p_m4a1");
         return 0;
     }
     *persistent_models = model_arena->used;
@@ -1192,6 +1899,16 @@ static int load_game_resources(
         model_arena, *persistent_models, weapon,
         team == TEAM_T ? WEAPON_GLOCK : WEAPON_USP
     );
+    if (!g_view_model.loaded || !g_view_animation.loaded ||
+        !g_muzzle.loaded) {
+        lite_log_line("load failed: initial view weapon");
+        lite_log_u32(
+            "model_arena_used", (uint32_t)model_arena->used
+        );
+        lite_log_u32(
+            "model_arena_failures", (uint32_t)model_arena->failures
+        );
+    }
     return g_view_model.loaded && g_muzzle.loaded;
 }
 
@@ -1244,6 +1961,14 @@ static void initialize_round(
                 weapons[index & 3u];
         }
         bots[index].health = 100u;
+        bots[index].ammo =
+            g_weapon_capacity[bots[index].weapon];
+        bots[index].armor = 100u;
+        bots[index].helmet = 1u;
+        bots[index].money = 800u;
+        bots[index].grenade = (uint8_t)(index % GRENADE_KIND_COUNT);
+        bots[index].nav_lane = (uint8_t)(index % 3u);
+        bots[index].role = (uint8_t)(index % 3u);
         bots[index].aim_seed = (uint16_t)(
             (now >> 3) ^ (index * 977u + 0x5a3du)
         );
@@ -1258,7 +1983,9 @@ static void initialize_round(
     }
     bda_memset(bomb, 0, sizeof(*bomb));
     bomb->enabled = (uint8_t)(
-        map_id == MAP_DE_DUST2 &&
+        (map_id == MAP_DE_DUST2 ||
+         map_id == MAP_DE_INFERNO ||
+         map_id == MAP_DE_NUKE) &&
         c15_map_bomb_site_count(&g_map) != 0u
     );
     if (bomb->enabled) {
@@ -1272,6 +1999,532 @@ static void initialize_round(
                 }
             }
         }
+    }
+}
+
+static void initialize_hostages(
+    c15_hostage_t hostages[HOSTAGE_MAX]
+)
+{
+    uint32_t count = c15_map_hostage_count(&g_map);
+    uint32_t index;
+    bda_memset(hostages, 0, sizeof(c15_hostage_t) * HOSTAGE_MAX);
+    if (count > HOSTAGE_MAX) count = HOSTAGE_MAX;
+    for (index = 0u; index < count; ++index) {
+        c15_camera_t spawn;
+        int32_t x;
+        int32_t y;
+        int32_t z;
+        if (!c15_map_hostage(&g_map, index, &x, &y, &z)) {
+            continue;
+        }
+        bda_memset(&spawn, 0, sizeof(spawn));
+        spawn.x = x;
+        spawn.y = y;
+        spawn.z = z + 28;
+        spawn.focal_length = DEFAULT_FOCAL_LENGTH;
+        c15_player_spawn(&hostages[index].mover, &spawn);
+        hostages[index].health = 100u;
+        hostages[index].active = 1u;
+        hostages[index].follower = HOSTAGE_FOLLOW_NONE;
+    }
+}
+
+static uint32_t hostage_count_rescued(
+    const c15_hostage_t hostages[HOSTAGE_MAX]
+)
+{
+    uint32_t count = 0u;
+    uint32_t index;
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        if (hostages[index].rescued) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static int clear_line(
+    const c15_map_t *map,
+    int32_t ax, int32_t ay, int32_t az,
+    int32_t bx, int32_t by, int32_t bz
+);
+static void add_impact(
+    c15_impact_t impacts[IMPACT_MAX],
+    int32_t x, int32_t y, int32_t z,
+    uint8_t kind, uint32_t now
+);
+static void add_corpse(
+    c15_corpse_t corpses[CORPSE_MAX],
+    int32_t x, int32_t y, int32_t z,
+    uint8_t team, uint32_t now
+);
+static uint32_t apply_hitgroup_damage(
+    uint32_t base, uint8_t hitgroup,
+    uint16_t *armor, uint8_t helmet
+);
+
+static int hostage_player_use(
+    c15_hostage_t hostages[HOSTAGE_MAX],
+    const c15_player_t *player,
+    uint8_t player_team,
+    c15_audio_t *audio
+)
+{
+    uint32_t nearest = 0xffffffffu;
+    uint32_t selected = HOSTAGE_MAX;
+    uint32_t index;
+    if (player_team != TEAM_CT) {
+        return 0;
+    }
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        uint32_t distance;
+        if (!hostages[index].active || hostages[index].rescued ||
+            hostages[index].health == 0u) {
+            continue;
+        }
+        distance = distance_squared(
+            player->x, player->y,
+            hostages[index].mover.x, hostages[index].mover.y
+        );
+        if (distance < nearest && distance <= 112u * 112u &&
+            abs_i32(player->z - hostages[index].mover.z) <= 96u) {
+            nearest = distance;
+            selected = index;
+        }
+    }
+    if (selected == HOSTAGE_MAX) {
+        return 0;
+    }
+    hostages[selected].follower =
+        hostages[selected].follower == HOSTAGE_FOLLOW_PLAYER ?
+            HOSTAGE_FOLLOW_NONE : HOSTAGE_FOLLOW_PLAYER;
+    c15_audio_play(
+        audio, C15_SOUND_CUE_HOSTAGE, C15_SOUND_CHANNEL_BOT
+    );
+    return 1;
+}
+
+static void hostage_logic(
+    c15_hostage_t hostages[HOSTAGE_MAX],
+    c15_bot_t bots[BOT_COUNT],
+    const c15_player_t *player,
+    uint8_t player_team
+)
+{
+    uint32_t index;
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        c15_hostage_t *hostage = &hostages[index];
+        int32_t target_x;
+        int32_t target_y;
+        uint32_t distance;
+        uint32_t controls = 0u;
+        int has_follower = 0;
+        if (!hostage->active || hostage->rescued ||
+            hostage->health == 0u) {
+            continue;
+        }
+        if (hostage->follower == HOSTAGE_FOLLOW_PLAYER) {
+            if (player_team == TEAM_CT) {
+                target_x = player->x;
+                target_y = player->y;
+                has_follower = 1;
+            } else {
+                hostage->follower = HOSTAGE_FOLLOW_NONE;
+            }
+        } else if (hostage->follower < BOT_COUNT) {
+            c15_bot_t *bot = &bots[hostage->follower];
+            if (bot->alive && bot->team == TEAM_CT) {
+                target_x = bot->mover.x;
+                target_y = bot->mover.y;
+                has_follower = 1;
+            } else {
+                hostage->follower = HOSTAGE_FOLLOW_NONE;
+            }
+        }
+        if (!has_follower) {
+            uint32_t bot_index;
+            uint32_t nearest = 96u * 96u + 1u;
+            for (bot_index = 0u; bot_index < BOT_COUNT; ++bot_index) {
+                uint32_t bot_distance;
+                if (!bots[bot_index].alive ||
+                    bots[bot_index].team != TEAM_CT) {
+                    continue;
+                }
+                bot_distance = distance_squared(
+                    hostage->mover.x, hostage->mover.y,
+                    bots[bot_index].mover.x, bots[bot_index].mover.y
+                );
+                if (bot_distance < nearest) {
+                    nearest = bot_distance;
+                    hostage->follower = (uint8_t)bot_index;
+                }
+            }
+            continue;
+        }
+        distance = distance_squared(
+            hostage->mover.x, hostage->mover.y, target_x, target_y
+        );
+        if (distance > 56u * 56u) {
+            hostage->mover.yaw = yaw_from_delta(
+                target_x - hostage->mover.x,
+                target_y - hostage->mover.y
+            );
+            hostage->mover.yaw_q8 =
+                (uint16_t)((uint16_t)hostage->mover.yaw << 8);
+            controls = C15_MOVE_FORWARD;
+        }
+        {
+            int32_t before_x = hostage->mover.x;
+            int32_t before_y = hostage->mover.y;
+            c15_player_step_speed(
+                &hostage->mover, &g_map, controls, 3u
+            );
+            hostage->moving = (uint8_t)(
+                hostage->mover.x != before_x ||
+                hostage->mover.y != before_y
+            );
+        }
+        if (c15_map_in_rescue_zone(
+                &g_map,
+                hostage->mover.x, hostage->mover.y,
+                hostage->mover.z)) {
+            hostage->rescued = 1u;
+            hostage->active = 0u;
+        }
+    }
+}
+
+static int throw_grenade(
+    c15_grenade_t grenades[GRENADE_MAX],
+    uint8_t kind,
+    uint8_t owner_team,
+    uint8_t owner,
+    const c15_camera_t *camera,
+    uint32_t now
+)
+{
+    uint32_t index;
+    int32_t yaw_sine = sin_q14_q8(camera->yaw_q8);
+    int32_t yaw_cosine = cos_q14_q8(camera->yaw_q8);
+    int32_t pitch_sine = sin_q14_q8((uint16_t)camera->pitch_q8);
+    int32_t pitch_cosine = cos_q14_q8((uint16_t)camera->pitch_q8);
+    for (index = 0u; index < GRENADE_MAX; ++index) {
+        c15_grenade_t *grenade = &grenades[index];
+        int32_t forward_x;
+        int32_t forward_y;
+        if (grenade->active != 0u) {
+            continue;
+        }
+        forward_x = (int32_t)(
+            ((int64_t)yaw_cosine * pitch_cosine) >> 14
+        );
+        forward_y = (int32_t)(
+            ((int64_t)yaw_sine * pitch_cosine) >> 14
+        );
+        bda_memset(grenade, 0, sizeof(*grenade));
+        grenade->x_q8 = camera->x << 8;
+        grenade->y_q8 = camera->y << 8;
+        grenade->z_q8 = (camera->z - 6) << 8;
+        grenade->vx_q8 = (int32_t)(
+            ((int64_t)forward_x * 14 * 256) >> 14
+        );
+        grenade->vy_q8 = (int32_t)(
+            ((int64_t)forward_y * 14 * 256) >> 14
+        );
+        grenade->vz_q8 = 1500 +
+            (int32_t)(((int64_t)pitch_sine * 7 * 256) >> 14);
+        grenade->detonate_at = now +
+            (kind == GRENADE_SMOKE ? 1800u : 1500u);
+        grenade->kind = kind;
+        grenade->owner_team = owner_team;
+        grenade->owner = owner;
+        grenade->active = 1u;
+        return 1;
+    }
+    return 0;
+}
+
+static int line_crosses_smoke(
+    const c15_grenade_t grenades[GRENADE_MAX],
+    int32_t ax,
+    int32_t ay,
+    int32_t bx,
+    int32_t by
+)
+{
+    uint32_t grenade_index;
+    for (grenade_index = 0u;
+         grenade_index < GRENADE_MAX; ++grenade_index) {
+        const c15_grenade_t *grenade = &grenades[grenade_index];
+        uint32_t step;
+        int32_t smoke_x;
+        int32_t smoke_y;
+        if (grenade->active != 2u) {
+            continue;
+        }
+        smoke_x = grenade->x_q8 >> 8;
+        smoke_y = grenade->y_q8 >> 8;
+        for (step = 1u; step < 8u; ++step) {
+            int32_t x = ax + (bx - ax) * (int32_t)step / 8;
+            int32_t y = ay + (by - ay) * (int32_t)step / 8;
+            if (distance_squared(x, y, smoke_x, smoke_y) <=
+                    128u * 128u) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void grenade_logic(
+    c15_grenade_t grenades[GRENADE_MAX],
+    c15_bot_t bots[BOT_COUNT],
+    c15_hostage_t hostages[HOSTAGE_MAX],
+    uint8_t player_team,
+    uint16_t *player_health,
+    uint16_t *player_armor,
+    uint8_t player_helmet,
+    const c15_player_t *player,
+    uint32_t *flash_until,
+    c15_corpse_t corpses[CORPSE_MAX],
+    c15_impact_t impacts[IMPACT_MAX],
+    c15_kill_feed_t *kill_feed,
+    uint32_t *money,
+    uint32_t *player_kills,
+    uint32_t *player_deaths,
+    c15_audio_t *audio,
+    uint32_t now
+)
+{
+    uint32_t index;
+    (void)player_helmet;
+    for (index = 0u; index < GRENADE_MAX; ++index) {
+        c15_grenade_t *grenade = &grenades[index];
+        int32_t x;
+        int32_t y;
+        int32_t z;
+        if (grenade->active == 0u) {
+            continue;
+        }
+        if (grenade->active == 2u) {
+            if (time_reached(now, grenade->detonate_at)) {
+                grenade->active = 0u;
+            }
+            continue;
+        }
+        grenade->vz_q8 -= 180;
+        {
+            int32_t next_x_q8 = grenade->x_q8 + grenade->vx_q8;
+            int32_t next_y_q8 = grenade->y_q8 + grenade->vy_q8;
+            int32_t next_z_q8 = grenade->z_q8 + grenade->vz_q8;
+            int32_t next_x = next_x_q8 >> 8;
+            int32_t next_y = next_y_q8 >> 8;
+            int32_t next_z = next_z_q8 >> 8;
+            if (c15_map_hull_contents(
+                    &g_map, 0u, next_x, next_y, next_z) == -2) {
+                grenade->vx_q8 = -grenade->vx_q8 / 2;
+                grenade->vy_q8 = -grenade->vy_q8 / 2;
+                grenade->vz_q8 =
+                    abs_i32(grenade->vz_q8) > 256u ?
+                        (int32_t)abs_i32(grenade->vz_q8) / 2 : 0;
+                if (!grenade->bounced) {
+                    c15_audio_play(
+                        audio, C15_SOUND_CUE_GRENADE_BOUNCE,
+                        C15_SOUND_CHANNEL_BOT
+                    );
+                    grenade->bounced = 1u;
+                }
+            } else {
+                grenade->x_q8 = next_x_q8;
+                grenade->y_q8 = next_y_q8;
+                grenade->z_q8 = next_z_q8;
+            }
+        }
+        if (!time_reached(now, grenade->detonate_at)) {
+            continue;
+        }
+        x = grenade->x_q8 >> 8;
+        y = grenade->y_q8 >> 8;
+        z = grenade->z_q8 >> 8;
+        if (grenade->kind == GRENADE_SMOKE) {
+            grenade->active = 2u;
+            grenade->detonate_at = now + 15000u;
+            grenade->vx_q8 = grenade->vy_q8 = grenade->vz_q8 = 0;
+            c15_audio_play(
+                audio, C15_SOUND_CUE_SMOKE, C15_SOUND_CHANNEL_BOT
+            );
+            continue;
+        }
+        add_impact(impacts, x, y, z, 2u, now);
+        if (grenade->kind == GRENADE_FLASH) {
+            uint32_t bot_index;
+            uint32_t distance = distance_squared(
+                x, y, player->x, player->y
+            );
+            if (distance <= 900u * 900u &&
+                clear_line(
+                    &g_map, x, y, z,
+                    player->x, player->y, player->z + 28)) {
+                uint32_t duration =
+                    4500u - (distance / (900u * 900u / 3500u));
+                if (duration < 800u) duration = 800u;
+                *flash_until = now + duration;
+            }
+            for (bot_index = 0u;
+                 bot_index < BOT_COUNT; ++bot_index) {
+                c15_bot_t *bot = &bots[bot_index];
+                distance = distance_squared(
+                    x, y, bot->mover.x, bot->mover.y
+                );
+                if (bot->alive && distance <= 900u * 900u &&
+                    clear_line(
+                        &g_map, x, y, z,
+                        bot->mover.x, bot->mover.y,
+                        bot->mover.z + 28)) {
+                    uint32_t duration =
+                        3500u -
+                        (distance / (900u * 900u / 2800u));
+                    if (duration < 500u) duration = 500u;
+                    bot->flash_until = now + duration;
+                }
+            }
+            c15_audio_play(
+                audio, C15_SOUND_CUE_FLASH_EXPLODE,
+                C15_SOUND_CHANNEL_BOT
+            );
+            grenade->active = 0u;
+            continue;
+        }
+        c15_audio_play(
+            audio, C15_SOUND_CUE_HE_EXPLODE, C15_SOUND_CHANNEL_BOT
+        );
+        {
+            uint32_t bot_index;
+            for (bot_index = 0u; bot_index < BOT_COUNT; ++bot_index) {
+                c15_bot_t *bot = &bots[bot_index];
+                uint32_t distance;
+                uint32_t damage;
+                if (!bot->alive ||
+                    (bot->team == grenade->owner_team &&
+                     grenade->owner != bot_index + 1u)) {
+                    continue;
+                }
+                distance = distance_squared(
+                    x, y, bot->mover.x, bot->mover.y
+                );
+                if (distance > 360u * 360u ||
+                    !clear_line(
+                        &g_map, x, y, z,
+                        bot->mover.x, bot->mover.y,
+                        bot->mover.z + 28)) {
+                    continue;
+                }
+                damage = 110u -
+                    (distance * 90u) / (360u * 360u);
+                damage = apply_hitgroup_damage(
+                    damage, 2u, &bot->armor, bot->helmet
+                );
+                if (bot->health <= damage) {
+                    bot->health = 0u;
+                    bot->alive = 0u;
+                    ++bot->deaths;
+                    add_corpse(
+                        corpses, bot->mover.x, bot->mover.y,
+                        bot->mover.z, bot->team, now
+                    );
+                    kill_feed->killer = grenade->owner;
+                    kill_feed->victim = (uint8_t)(bot_index + 1u);
+                    kill_feed->weapon = 0xffu;
+                    kill_feed->headshot = 0u;
+                    kill_feed->until = now + 3500u;
+                    if (grenade->owner == 0u) {
+                        ++*player_kills;
+                        *money += 300u;
+                        if (*money > 16000u) *money = 16000u;
+                    } else if (grenade->owner <= BOT_COUNT) {
+                        ++bots[grenade->owner - 1u].kills;
+                    }
+                } else {
+                    bot->health = (uint16_t)(bot->health - damage);
+                }
+            }
+        }
+        if (grenade->owner == 0u ||
+            grenade->owner_team != player_team) {
+            uint32_t distance = distance_squared(
+                x, y, player->x, player->y
+            );
+            if (distance <= 360u * 360u &&
+                clear_line(
+                    &g_map, x, y, z,
+                    player->x, player->y, player->z + 28)) {
+                uint32_t damage = 110u -
+                    (distance * 90u) / (360u * 360u);
+                damage = apply_hitgroup_damage(
+                    damage, 2u, player_armor, 0u
+                );
+                if (*player_health <= damage) {
+                    *player_health = 0u;
+                    add_corpse(
+                        corpses, player->x, player->y,
+                        player->z, player_team, now
+                    );
+                    kill_feed->killer = grenade->owner;
+                    kill_feed->victim = 0u;
+                    kill_feed->weapon = 0xffu;
+                    kill_feed->headshot = 0u;
+                    kill_feed->until = now + 3500u;
+                    ++*player_deaths;
+                    if (grenade->owner != 0u &&
+                        grenade->owner <= BOT_COUNT) {
+                        ++bots[grenade->owner - 1u].kills;
+                    }
+                    c15_audio_play(
+                        audio, C15_SOUND_CUE_DEATH,
+                        C15_SOUND_CHANNEL_PLAYER
+                    );
+                } else {
+                    *player_health =
+                        (uint16_t)(*player_health - damage);
+                }
+            }
+        }
+        {
+            uint32_t hostage_index;
+            for (hostage_index = 0u;
+                 hostage_index < HOSTAGE_MAX; ++hostage_index) {
+                c15_hostage_t *hostage = &hostages[hostage_index];
+                uint32_t distance;
+                uint32_t damage;
+                if (!hostage->active || hostage->rescued) {
+                    continue;
+                }
+                distance = distance_squared(
+                    x, y, hostage->mover.x, hostage->mover.y
+                );
+                if (distance > 360u * 360u) continue;
+                damage = 110u -
+                    (distance * 90u) / (360u * 360u);
+                if (hostage->health <= damage) {
+                    hostage->health = 0u;
+                    hostage->active = 0u;
+                    add_corpse(
+                        corpses,
+                        hostage->mover.x, hostage->mover.y,
+                        hostage->mover.z, 0u, now
+                    );
+                    if (grenade->owner == 0u) {
+                        if (*money > 2250u) *money -= 2250u;
+                        else *money = 0u;
+                    }
+                } else {
+                    hostage->health =
+                        (uint16_t)(hostage->health - damage);
+                }
+            }
+        }
+        grenade->active = 0u;
     }
 }
 
@@ -1305,6 +2558,163 @@ static int clear_line(
         if (contents == -2) {
             return 0;
         }
+    }
+    return 1;
+}
+
+static uint16_t next_random(uint16_t *seed)
+{
+    *seed = (uint16_t)(*seed * 25173u + 13849u);
+    return *seed;
+}
+
+static void add_impact(
+    c15_impact_t impacts[IMPACT_MAX],
+    int32_t x,
+    int32_t y,
+    int32_t z,
+    uint8_t kind,
+    uint32_t now
+)
+{
+    uint32_t index;
+    uint32_t selected = 0u;
+    for (index = 0u; index < IMPACT_MAX; ++index) {
+        if (!impacts[index].active ||
+            time_reached(now, impacts[index].until)) {
+            selected = index;
+            break;
+        }
+        if (impacts[index].until < impacts[selected].until) {
+            selected = index;
+        }
+    }
+    impacts[selected].x = x;
+    impacts[selected].y = y;
+    impacts[selected].z = z;
+    impacts[selected].kind = kind;
+    impacts[selected].until = now + (
+        kind == 0u ? 5000u : (kind == 1u ? 700u : 900u)
+    );
+    impacts[selected].active = 1u;
+}
+
+static void add_corpse(
+    c15_corpse_t corpses[CORPSE_MAX],
+    int32_t x,
+    int32_t y,
+    int32_t z,
+    uint8_t team,
+    uint32_t now
+)
+{
+    uint32_t index;
+    uint32_t selected = 0u;
+    for (index = 0u; index < CORPSE_MAX; ++index) {
+        if (!corpses[index].active) {
+            selected = index;
+            break;
+        }
+        if (corpses[index].died_at < corpses[selected].died_at) {
+            selected = index;
+        }
+    }
+    corpses[selected].x = x;
+    corpses[selected].y = y;
+    corpses[selected].z = z;
+    corpses[selected].team = team;
+    corpses[selected].died_at = now;
+    corpses[selected].active = 1u;
+}
+
+static uint32_t apply_hitgroup_damage(
+    uint32_t base,
+    uint8_t hitgroup,
+    uint16_t *armor,
+    uint8_t helmet
+)
+{
+    uint32_t damage = base;
+    int protected_hit = 0;
+    if (hitgroup == 1u) {
+        damage *= 4u;
+        protected_hit = helmet != 0u;
+    } else if (hitgroup == 3u) {
+        damage = (damage * 3u + 3u) / 4u;
+    } else {
+        protected_hit = 1;
+    }
+    if (armor && *armor != 0u && protected_hit) {
+        uint32_t absorbed = (damage * 2u + 4u) / 5u;
+        if (absorbed > *armor) {
+            absorbed = *armor;
+        }
+        *armor = (uint16_t)(*armor - absorbed);
+        damage -= absorbed;
+    }
+    return damage == 0u ? 1u : damage;
+}
+
+static uint32_t range_adjusted_damage(
+    uint32_t damage, uint32_t weapon, uint32_t distance
+)
+{
+    uint32_t steps = distance / 500u;
+    while (steps-- != 0u) {
+        damage = (
+            damage * g_weapon_range_modifier_q8[weapon] + 128u
+        ) >> 8;
+    }
+    return damage == 0u ? 1u : damage;
+}
+
+static int bullet_line_clear(
+    c15_map_t *map,
+    int32_t ax,
+    int32_t ay,
+    int32_t az,
+    int32_t bx,
+    int32_t by,
+    int32_t bz,
+    uint8_t penetration,
+    int damage_breakables,
+    int32_t *impact_x,
+    int32_t *impact_y,
+    int32_t *impact_z
+)
+{
+    uint32_t span = abs_i32(bx - ax);
+    uint32_t segments;
+    uint32_t step;
+    uint32_t layers = 0u;
+    int in_solid = 0;
+    if (abs_i32(by - ay) > span) span = abs_i32(by - ay);
+    if (abs_i32(bz - az) > span) span = abs_i32(bz - az);
+    segments = span / 24u + 1u;
+    if (segments < 2u) segments = 2u;
+    if (segments > 96u) segments = 96u;
+    for (step = 1u; step <= segments; ++step) {
+        int32_t x = ax + (bx - ax) * (int32_t)step /
+            (int32_t)segments;
+        int32_t y = ay + (by - ay) * (int32_t)step /
+            (int32_t)segments;
+        int32_t z = az + (bz - az) * (int32_t)step /
+            (int32_t)segments;
+        int solid = c15_map_hull_contents(map, 0u, x, y, z) == -2;
+        if (damage_breakables && solid && !in_solid &&
+            c15_map_damage_breakable(map, x, y, z)) {
+            solid = 0;
+        }
+        if (solid && !in_solid) {
+            ++layers;
+            if (layers > penetration) {
+                if (impact_x) *impact_x = x;
+                if (impact_y) *impact_y = y;
+                if (impact_z) *impact_z = z;
+                return 0;
+            }
+        }
+        in_solid = solid;
     }
     return 1;
 }
@@ -1347,9 +2757,13 @@ static int nearest_bomb_site(
 
 static void bot_logic(
     c15_bot_t bots[BOT_COUNT],
+    c15_grenade_t grenades[GRENADE_MAX],
+    c15_hostage_t hostages[HOSTAGE_MAX],
     c15_player_t *player,
     uint8_t player_team,
     uint16_t *player_health,
+    uint16_t *player_armor,
+    uint8_t player_helmet,
     uint8_t difficulty,
     uint32_t map_id,
     const c15_bomb_state_t *bomb,
@@ -1357,7 +2771,9 @@ static void bot_logic(
     uint32_t *shots,
     uint32_t *hits,
     uint32_t *sound_weapon,
-    uint32_t *player_deaths
+    uint32_t *player_deaths,
+    c15_corpse_t corpses[CORPSE_MAX],
+    c15_kill_feed_t *kill_feed
 )
 {
     uint32_t route_count = map_route_count(map_id);
@@ -1366,6 +2782,7 @@ static void bot_logic(
         c15_bot_t *bot = &bots[index];
         uint32_t nearest = 0xffffffffu;
         uint32_t nearest_friend = 0xffffffffu;
+        int nearest_friend_index = -1;
         int target = -2;
         int32_t target_x = 0;
         int32_t target_y = 0;
@@ -1387,6 +2804,7 @@ static void bot_logic(
         int objective_active = 0;
         int32_t objective_x = 0;
         int32_t objective_y = 0;
+        int returning_hostage = 0;
         if (!bot->alive) {
             bot->moving = 0u;
             continue;
@@ -1412,6 +2830,7 @@ static void bot_logic(
             if (bots[other].team == bot->team) {
                 if (distance < nearest_friend) {
                     nearest_friend = distance;
+                    nearest_friend_index = (int)other;
                 }
                 continue;
             }
@@ -1440,9 +2859,23 @@ static void bot_logic(
                  &g_map,
                  bot->mover.x, bot->mover.y, bot->mover.z + 28,
                  target_x, target_y, target_z + 28
-            );
+            ) &&
+            !line_crosses_smoke(
+                grenades,
+                bot->mover.x, bot->mover.y, target_x, target_y
+            ) &&
+            !time_active(now, bot->flash_until);
+        if (target_visible) {
+            bot->last_enemy_x = target_x;
+            bot->last_enemy_y = target_y;
+            bot->last_enemy_seen = now;
+        }
         if (bomb && bomb->enabled) {
             if (bomb->planted && bot->team == TEAM_CT) {
+                objective_active = 1;
+                objective_x = bomb->x;
+                objective_y = bomb->y;
+            } else if (bomb->dropped && bot->team == TEAM_T) {
                 objective_active = 1;
                 objective_x = bomb->x;
                 objective_y = bomb->y;
@@ -1459,14 +2892,31 @@ static void bot_logic(
                 (void)objective_site;
                 (void)objective_z;
             }
+        } else if (bot->team == TEAM_CT) {
+            for (other = 0u; other < HOSTAGE_MAX; ++other) {
+                if (hostages[other].active &&
+                    hostages[other].follower == index) {
+                    returning_hostage = 1;
+                    break;
+                }
+            }
         }
         move_x = target_x;
         move_y = target_y;
         if (!target_visible) {
             uint8_t previous_nav_index = bot->nav_index;
-            if (!objective_active) {
-                has_nav = map_route_point(
-                    map_id, bot->nav_index, &nav_x, &nav_y, &nav_z
+            int pursuing_last_position =
+                bot->last_enemy_seen != 0u &&
+                time_active(now, bot->last_enemy_seen + 2200u);
+            int supporting_friend =
+                bot->role == BOT_ROLE_SUPPORT &&
+                nearest_friend_index >= 0 &&
+                nearest_friend > 220u * 220u;
+            if (!objective_active && !pursuing_last_position &&
+                !supporting_friend) {
+                has_nav = map_route_lane_point(
+                    map_id, bot->nav_index, bot->nav_lane,
+                    &nav_x, &nav_y, &nav_z
                 );
             }
             if (has_nav &&
@@ -1474,15 +2924,19 @@ static void bot_logic(
                     bot->mover.x, bot->mover.y,
                     nav_x, nav_y) < 32u * 32u &&
                 abs_i32(bot->mover.z - nav_z) < 32u) {
-                if (bot->team == TEAM_CT &&
+                if (returning_hostage &&
+                    bot->nav_index != 0u) {
+                    --bot->nav_index;
+                } else if (bot->team == TEAM_CT &&
                     bot->nav_index + 1u < route_count) {
                     ++bot->nav_index;
                 } else if (bot->team == TEAM_T &&
                            bot->nav_index != 0u) {
                     --bot->nav_index;
                 }
-                has_nav = map_route_point(
-                    map_id, bot->nav_index, &nav_x, &nav_y, &nav_z
+                has_nav = map_route_lane_point(
+                    map_id, bot->nav_index, bot->nav_lane,
+                    &nav_x, &nav_y, &nav_z
                 );
             }
             if (bot->nav_index != previous_nav_index) {
@@ -1491,18 +2945,44 @@ static void bot_logic(
             if (has_nav) {
                 move_x = nav_x;
                 move_y = nav_y;
+            } else if (pursuing_last_position) {
+                move_x = bot->last_enemy_x;
+                move_y = bot->last_enemy_y;
             } else if (objective_active) {
                 move_x = objective_x;
                 move_y = objective_y;
+            } else if (supporting_friend) {
+                move_x = bots[(uint32_t)nearest_friend_index].mover.x;
+                move_y = bots[(uint32_t)nearest_friend_index].mover.y;
             }
             bot->mover.yaw = yaw_from_delta(
                 move_x - bot->mover.x, move_y - bot->mover.y
             );
             controls = C15_MOVE_FORWARD;
+            if (!objective_active &&
+                bot->role == BOT_ROLE_ANCHOR &&
+                ((bot->team == TEAM_CT &&
+                  bot->nav_index >= route_count / 2u) ||
+                 (bot->team == TEAM_T &&
+                  bot->nav_index <= route_count / 2u))) {
+                controls = 0u;
+            }
             bot->combat = 0u;
         } else {
+            uint32_t hold_min = BOT_HOLD_MIN_DISTANCE;
+            uint32_t hold_max = BOT_HOLD_MAX_DISTANCE;
             bot->mover.yaw = target_yaw;
             bot->combat = 1u;
+            if (bot->role == BOT_ROLE_ENTRY) {
+                hold_min = 170u;
+                hold_max = 430u;
+            } else if (bot->role == BOT_ROLE_SUPPORT) {
+                hold_min = 300u;
+                hold_max = 680u;
+            } else {
+                hold_min = 380u;
+                hold_max = 760u;
+            }
             if (time_reached(now, bot->next_decision)) {
                 bot->aim_seed = (uint16_t)(
                     bot->aim_seed * 25173u + 13849u
@@ -1513,11 +2993,13 @@ static void bot_logic(
                     now + 650u - (uint32_t)difficulty * 150u +
                     (bot->aim_seed & 0x1ffu);
             }
-            if (nearest > BOT_HOLD_MAX_DISTANCE *
-                          BOT_HOLD_MAX_DISTANCE) {
+            if (bot->health < 30u) {
+                controls = C15_MOVE_BACK |
+                    (bot->strafe_right ?
+                        C15_MOVE_RIGHT : C15_MOVE_LEFT);
+            } else if (nearest > hold_max * hold_max) {
                 controls = C15_MOVE_FORWARD;
-            } else if (nearest < BOT_HOLD_MIN_DISTANCE *
-                                 BOT_HOLD_MIN_DISTANCE) {
+            } else if (nearest < hold_min * hold_min) {
                 controls = C15_MOVE_BACK |
                     (bot->strafe_right ?
                         C15_MOVE_RIGHT : C15_MOVE_LEFT);
@@ -1564,6 +3046,12 @@ static void bot_logic(
             bot->mover.x != before_x || bot->mover.y != before_y
         );
         if (bot->mover.blocked_steps != before_blocked) {
+            if (bot->stuck_turn == 0u) {
+                (void)c15_map_use_dynamic(
+                    &g_map, bot->mover.x, bot->mover.y,
+                    bot->mover.z + 28
+                );
+            }
             bot->stuck_turn = 8u;
             bot->strafe_right ^= 1u;
             ++bot->nav_stalls;
@@ -1589,11 +3077,41 @@ static void bot_logic(
             bot->burst_left = 0u;
         }
         bot->target_visible_last = (uint8_t)target_visible;
+        if (target_visible && bot->grenade < GRENADE_KIND_COUNT &&
+            nearest > 360u * 360u && nearest < 900u * 900u &&
+            time_reached(now, bot->next_decision)) {
+            c15_camera_t grenade_camera;
+            bda_memset(&grenade_camera, 0, sizeof(grenade_camera));
+            grenade_camera.x = bot->mover.x;
+            grenade_camera.y = bot->mover.y;
+            grenade_camera.z = bot->mover.z + 28;
+            grenade_camera.yaw = bot->mover.yaw;
+            grenade_camera.yaw_q8 = bot->mover.yaw_q8;
+            grenade_camera.focal_length = DEFAULT_FOCAL_LENGTH;
+            if (throw_grenade(
+                    grenades, bot->grenade, bot->team,
+                    (uint8_t)(index + 1u),
+                    &grenade_camera, now)) {
+                bot->grenade = 0xffu;
+                bot->next_decision = now + 2500u;
+            }
+        }
         if (target_visible &&
             time_reached(now, bot->next_fire) &&
             nearest < BOT_SIGHT_DISTANCE * BOT_SIGHT_DISTANCE) {
             uint16_t *health = target < 0 ?
                 player_health : &bots[(uint32_t)target].health;
+            uint16_t *armor = target < 0 ?
+                player_armor : &bots[(uint32_t)target].armor;
+            uint8_t helmet = target < 0 ?
+                player_helmet : bots[(uint32_t)target].helmet;
+            if (bot->ammo == 0u) {
+                bot->ammo = g_weapon_capacity[bot->weapon];
+                bot->next_fire = now + 1900u;
+                bot->burst_left = 0u;
+                continue;
+            }
+            --bot->ammo;
             bot->aim_seed = (uint16_t)(
                 bot->aim_seed * 25173u + 13849u
             );
@@ -1621,19 +3139,44 @@ static void bot_logic(
                         g_bot_accuracy[difficulty][1] :
                         g_bot_accuracy[difficulty][2])) {
                 ++*hits;
-                if (*health <= g_bot_damage[difficulty]) {
+                {
+                    uint8_t hitgroup =
+                        (bot->aim_seed & 15u) == 0u ? 1u : 2u;
+                    uint32_t damage = apply_hitgroup_damage(
+                        g_bot_damage[difficulty], hitgroup,
+                        armor, helmet
+                    );
+                if (*health <= damage) {
                     *health = 0u;
                     ++bot->kills;
                     if (target >= 0) {
                         bots[(uint32_t)target].alive = 0u;
                         ++bots[(uint32_t)target].deaths;
+                        add_corpse(
+                            corpses,
+                            bots[(uint32_t)target].mover.x,
+                            bots[(uint32_t)target].mover.y,
+                            bots[(uint32_t)target].mover.z,
+                            bots[(uint32_t)target].team, now
+                        );
                     } else {
                         ++*player_deaths;
+                        add_corpse(
+                            corpses, player->x, player->y,
+                            player->z, player_team, now
+                        );
                     }
+                    kill_feed->killer = (uint8_t)(index + 1u);
+                    kill_feed->victim = target < 0 ?
+                        0u : (uint8_t)(target + 1);
+                    kill_feed->weapon = bot->weapon;
+                    kill_feed->headshot = hitgroup == 1u;
+                    kill_feed->until = now + 3500u;
                 } else {
                     *health = (uint16_t)(
-                        *health - g_bot_damage[difficulty]
+                        *health - damage
                     );
+                }
                 }
             }
         }
@@ -1664,6 +3207,7 @@ static void bomb_complete_plant(
     bomb->z = z;
     bomb->planted = 1u;
     bomb->player_carrier = 0u;
+    bomb->dropped = 0u;
     bomb->action = BOMB_ACTION_NONE;
     bomb->action_owner = 0u;
     bomb->explode_at = now + BOMB_TIME_MS;
@@ -1679,6 +3223,7 @@ static void bomb_player_update(
     const c15_player_t *player,
     uint8_t player_team,
     uint16_t player_health,
+    uint8_t has_defuse_kit,
     const lite_input_t *input,
     uint32_t now,
     c15_audio_t *audio
@@ -1697,13 +3242,21 @@ static void bomb_player_update(
         }
         return;
     }
+    if (bomb->dropped && player_team == TEAM_T &&
+        bomb_near(
+            player->x, player->y, player->z,
+            bomb->x, bomb->y, bomb->z)) {
+        bomb->dropped = 0u;
+        bomb->player_carrier = 1u;
+    }
     if (bomb->planted && !bomb->defused &&
         player_team == TEAM_CT &&
         bomb_near(
             player->x, player->y, player->z,
             bomb->x, bomb->y, bomb->z)) {
         wanted_action = BOMB_ACTION_DEFUSE;
-        duration = BOMB_DEFUSE_MS;
+        duration = has_defuse_kit ? BOMB_DEFUSE_MS / 2u :
+            BOMB_DEFUSE_MS;
     } else if (!bomb->planted && bomb->player_carrier &&
                player_team == TEAM_T &&
                nearest_bomb_site(
@@ -1756,6 +3309,7 @@ static void bomb_player_update(
 static void bomb_bot_update(
     c15_bomb_state_t *bomb,
     c15_bot_t bots[BOT_COUNT],
+    const c15_player_t *player,
     uint8_t player_team,
     uint16_t player_health,
     uint32_t now,
@@ -1769,6 +3323,10 @@ static void bomb_bot_update(
     if (bomb->player_carrier && player_team == TEAM_T &&
         player_health == 0u) {
         bomb->player_carrier = 0u;
+        bomb->dropped = 1u;
+        bomb->x = player->x;
+        bomb->y = player->y;
+        bomb->z = player->z;
     }
     if (!bomb->planted && !bomb->player_carrier) {
         c15_bot_t *carrier = 0;
@@ -1777,13 +3335,25 @@ static void bomb_bot_update(
                 carrier = &bots[index];
                 break;
             }
+            if (bots[index].bomb_carrier && !bots[index].alive) {
+                bomb->dropped = 1u;
+                bomb->x = bots[index].mover.x;
+                bomb->y = bots[index].mover.y;
+                bomb->z = bots[index].mover.z;
+            }
             bots[index].bomb_carrier = 0u;
         }
-        if (!carrier) {
+        if (!carrier && bomb->dropped) {
             for (index = 0u; index < BOT_COUNT; ++index) {
-                if (bots[index].alive && bots[index].team == TEAM_T) {
+                if (bots[index].alive &&
+                    bots[index].team == TEAM_T &&
+                    bomb_near(
+                        bots[index].mover.x, bots[index].mover.y,
+                        bots[index].mover.z,
+                        bomb->x, bomb->y, bomb->z)) {
                     bots[index].bomb_carrier = 1u;
                     carrier = &bots[index];
+                    bomb->dropped = 0u;
                     break;
                 }
             }
@@ -1838,7 +3408,7 @@ static void bomb_bot_update(
                 bomb->action_started = now;
             } else if (time_reached(
                            now,
-                           bomb->action_started + BOMB_DEFUSE_MS)) {
+                           bomb->action_started + BOMB_DEFUSE_MS / 2u)) {
                 bomb->defused = 1u;
                 bomb->action = BOMB_ACTION_NONE;
                 bomb->action_owner = 0u;
@@ -1854,24 +3424,137 @@ static void bomb_bot_update(
     }
 }
 
+static void bomb_apply_explosion(
+    const c15_bomb_state_t *bomb,
+    c15_bot_t bots[BOT_COUNT],
+    c15_hostage_t hostages[HOSTAGE_MAX],
+    const c15_player_t *player,
+    uint16_t *player_health,
+    uint32_t *player_deaths,
+    c15_corpse_t corpses[CORPSE_MAX],
+    c15_kill_feed_t *kill_feed,
+    uint32_t now
+)
+{
+    uint32_t index;
+    uint32_t distance;
+    uint32_t damage;
+    distance = distance_squared(
+        bomb->x, bomb->y, player->x, player->y
+    );
+    if (*player_health != 0u && distance <= 900u * 900u &&
+        clear_line(
+            &g_map, bomb->x, bomb->y, bomb->z,
+            player->x, player->y, player->z + 28)) {
+        damage = 500u -
+            (distance * 400u) / (900u * 900u);
+        if (*player_health <= damage) {
+            *player_health = 0u;
+            ++*player_deaths;
+            add_corpse(
+                corpses, player->x, player->y,
+                player->z, 0u, now
+            );
+            kill_feed->killer = 0xffu;
+            kill_feed->victim = 0u;
+            kill_feed->weapon = 0xffu;
+            kill_feed->headshot = 0u;
+            kill_feed->until = now + 3500u;
+        } else {
+            *player_health =
+                (uint16_t)(*player_health - damage);
+        }
+    }
+    for (index = 0u; index < BOT_COUNT; ++index) {
+        c15_bot_t *bot = &bots[index];
+        if (!bot->alive) continue;
+        distance = distance_squared(
+            bomb->x, bomb->y, bot->mover.x, bot->mover.y
+        );
+        if (distance > 900u * 900u ||
+            !clear_line(
+                &g_map, bomb->x, bomb->y, bomb->z,
+                bot->mover.x, bot->mover.y,
+                bot->mover.z + 28)) {
+            continue;
+        }
+        damage = 500u -
+            (distance * 400u) / (900u * 900u);
+        if (bot->health <= damage) {
+            bot->health = 0u;
+            bot->alive = 0u;
+            ++bot->deaths;
+            add_corpse(
+                corpses, bot->mover.x, bot->mover.y,
+                bot->mover.z, bot->team, now
+            );
+            kill_feed->killer = 0xffu;
+            kill_feed->victim = (uint8_t)(index + 1u);
+            kill_feed->weapon = 0xffu;
+            kill_feed->headshot = 0u;
+            kill_feed->until = now + 3500u;
+        } else {
+            bot->health = (uint16_t)(bot->health - damage);
+        }
+    }
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        c15_hostage_t *hostage = &hostages[index];
+        if (!hostage->active) continue;
+        distance = distance_squared(
+            bomb->x, bomb->y,
+            hostage->mover.x, hostage->mover.y
+        );
+        if (distance > 900u * 900u) continue;
+        damage = 500u -
+            (distance * 400u) / (900u * 900u);
+        if (hostage->health <= damage) {
+            hostage->health = 0u;
+            hostage->active = 0u;
+            add_corpse(
+                corpses,
+                hostage->mover.x, hostage->mover.y,
+                hostage->mover.z, 0u, now
+            );
+        } else {
+            hostage->health =
+                (uint16_t)(hostage->health - damage);
+        }
+    }
+}
+
 static int player_fire_hit(
     c15_bot_t bots[BOT_COUNT],
+    c15_hostage_t hostages[HOSTAGE_MAX],
     const c15_camera_t *camera,
     uint8_t player_team,
     uint32_t weapon,
-    uint32_t *money
+    uint16_t shot_yaw_q8,
+    int16_t shot_pitch_q8,
+    int secondary_attack,
+    uint32_t *money,
+    c15_corpse_t corpses[CORPSE_MAX],
+    c15_impact_t impacts[IMPACT_MAX],
+    c15_kill_feed_t *kill_feed,
+    uint32_t now,
+    c15_audio_t *audio
 )
 {
-    int32_t yaw_sine = sin_q14_q8(camera->yaw_q8);
-    int32_t yaw_cosine = cos_q14_q8(camera->yaw_q8);
+    int32_t yaw_sine = sin_q14_q8(shot_yaw_q8);
+    int32_t yaw_cosine = cos_q14_q8(shot_yaw_q8);
     int32_t pitch_sine = sin_q14_q8(
-        (uint16_t)(int16_t)camera->pitch_q8
+        (uint16_t)shot_pitch_q8
     );
     int32_t pitch_cosine = cos_q14_q8(
-        (uint16_t)(int16_t)camera->pitch_q8
+        (uint16_t)shot_pitch_q8
     );
     uint32_t nearest = 0xffffffffu;
     int selected = -1;
+    int selected_hostage = -1;
+    int32_t selected_hit_x = camera->x;
+    int32_t selected_hit_y = camera->y;
+    int32_t selected_hit_z = camera->z;
+    int32_t selected_minimum_z = 0;
+    int32_t selected_maximum_z = 0;
     uint32_t index;
     for (index = 0u; index < BOT_COUNT; ++index) {
         const c15_model_t *body;
@@ -1954,32 +3637,219 @@ static int player_fire_hit(
         if (hit_z > maximum_z) hit_z = maximum_z;
         if ((weapon == WEAPON_KNIFE && distance > 90u * 90u) ||
             distance >= nearest ||
-            !clear_line(
+            !bullet_line_clear(
                 &g_map,
                 camera->x, camera->y, camera->z,
-                hit_x, hit_y, hit_z)) {
+                hit_x, hit_y, hit_z,
+                g_weapon_penetration[weapon], 0, 0, 0, 0)) {
             continue;
         }
         nearest = distance;
         selected = (int)index;
+        selected_hostage = -1;
+        selected_hit_x = hit_x;
+        selected_hit_y = hit_y;
+        selected_hit_z = hit_z;
+        selected_minimum_z = minimum_z;
+        selected_maximum_z = maximum_z;
     }
-    if (selected < 0) {
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        int32_t dx;
+        int32_t dy;
+        int32_t side;
+        int32_t forward;
+        int32_t minimum_z;
+        int32_t maximum_z;
+        int32_t minimum_view_y;
+        int32_t maximum_view_y;
+        int32_t hit_x;
+        int32_t hit_y;
+        int32_t hit_z;
+        uint32_t distance;
+        if (!hostages[index].active || hostages[index].rescued ||
+            hostages[index].health == 0u) {
+            continue;
+        }
+        dx = hostages[index].mover.x - camera->x;
+        dy = hostages[index].mover.y - camera->y;
+        side = (int32_t)(
+            ((int64_t)yaw_sine * dx -
+             (int64_t)yaw_cosine * dy) >> 14
+        );
+        forward = (int32_t)(
+            ((int64_t)yaw_cosine * dx +
+             (int64_t)yaw_sine * dy) >> 14
+        );
+        if (forward <= 0 || abs_i32(side) > 18u) {
+            continue;
+        }
+        minimum_z = hostages[index].mover.z;
+        maximum_z = hostages[index].mover.z + 72;
+        minimum_view_y = (int32_t)(
+            ((int64_t)pitch_cosine * (minimum_z - camera->z) -
+             (int64_t)pitch_sine * forward) >> 14
+        );
+        maximum_view_y = (int32_t)(
+            ((int64_t)pitch_cosine * (maximum_z - camera->z) -
+             (int64_t)pitch_sine * forward) >> 14
+        );
+        if (minimum_view_y > 0 || maximum_view_y < 0) {
+            continue;
+        }
+        distance = distance_squared(
+            camera->x, camera->y,
+            hostages[index].mover.x, hostages[index].mover.y
+        );
+        hit_x = camera->x +
+            (int32_t)(((int64_t)yaw_cosine * forward) >> 14);
+        hit_y = camera->y +
+            (int32_t)(((int64_t)yaw_sine * forward) >> 14);
+        hit_z = camera->z + (int32_t)(
+            ((int64_t)pitch_sine * forward) / pitch_cosine
+        );
+        if (hit_z < minimum_z) hit_z = minimum_z;
+        if (hit_z > maximum_z) hit_z = maximum_z;
+        if ((weapon == WEAPON_KNIFE && distance > 90u * 90u) ||
+            distance >= nearest ||
+            !bullet_line_clear(
+                &g_map,
+                camera->x, camera->y, camera->z,
+                hit_x, hit_y, hit_z,
+                g_weapon_penetration[weapon], 0, 0, 0, 0)) {
+            continue;
+        }
+        nearest = distance;
+        selected = -1;
+        selected_hostage = (int)index;
+        selected_hit_x = hit_x;
+        selected_hit_y = hit_y;
+        selected_hit_z = hit_z;
+        selected_minimum_z = minimum_z;
+        selected_maximum_z = maximum_z;
+    }
+    if (selected < 0 && selected_hostage < 0) {
+        int32_t shot_range =
+            weapon == WEAPON_KNIFE ? 90 : 2048;
+        int32_t direction_x = (int32_t)(
+            ((int64_t)yaw_cosine * pitch_cosine) >> 14
+        );
+        int32_t direction_y = (int32_t)(
+            ((int64_t)yaw_sine * pitch_cosine) >> 14
+        );
+        int32_t end_x = camera->x +
+            (int32_t)(((int64_t)direction_x * shot_range) >> 14);
+        int32_t end_y = camera->y +
+            (int32_t)(((int64_t)direction_y * shot_range) >> 14);
+        int32_t end_z = camera->z +
+            (int32_t)(((int64_t)pitch_sine * shot_range) >> 14);
+        int32_t impact_x = end_x;
+        int32_t impact_y = end_y;
+        int32_t impact_z = end_z;
+        if (!bullet_line_clear(
+                &g_map,
+                camera->x, camera->y, camera->z,
+                end_x, end_y, end_z,
+                g_weapon_penetration[weapon],
+                1,
+                &impact_x, &impact_y, &impact_z)) {
+            add_impact(
+                impacts, impact_x, impact_y, impact_z, 0u, now
+            );
+            c15_audio_play(
+                audio, C15_SOUND_CUE_RICOCHET,
+                C15_SOUND_CHANNEL_BOT
+            );
+        }
         return 0;
     }
-    if (bots[(uint32_t)selected].health <= g_weapon_damage[weapon]) {
-        bots[(uint32_t)selected].health = 0u;
-        bots[(uint32_t)selected].alive = 0u;
-        ++bots[(uint32_t)selected].deaths;
-        *money += 300u;
-        if (*money > 16000u) {
-            *money = 16000u;
-        }
-        return 2;
-    } else {
-        bots[(uint32_t)selected].health = (uint16_t)(
-            bots[(uint32_t)selected].health -
-            g_weapon_damage[weapon]
+    {
+        uint32_t height =
+            (uint32_t)(selected_maximum_z - selected_minimum_z);
+        uint8_t hitgroup =
+            selected_hit_z >= selected_maximum_z - (int32_t)(height / 5u) ?
+                1u :
+            selected_hit_z <= selected_minimum_z +
+                    (int32_t)(height * 7u / 20u) ? 3u : 2u;
+        uint32_t distance = abs_i32(selected_hit_x - camera->x);
+        uint32_t axis_distance = abs_i32(selected_hit_y - camera->y);
+        uint32_t damage;
+        if (axis_distance > distance) distance = axis_distance;
+        damage = range_adjusted_damage(
+            weapon == WEAPON_KNIFE && secondary_attack ?
+                65u : g_weapon_damage[weapon],
+            weapon, distance
         );
+        add_impact(
+            impacts, selected_hit_x, selected_hit_y,
+            selected_hit_z, 1u, now
+        );
+        c15_audio_play(
+            audio,
+            hitgroup == 1u ?
+                C15_SOUND_CUE_HEADSHOT : C15_SOUND_CUE_HIT_FLESH,
+            C15_SOUND_CHANNEL_BOT
+        );
+        if (selected_hostage >= 0) {
+            c15_hostage_t *hostage =
+                &hostages[(uint32_t)selected_hostage];
+            damage = apply_hitgroup_damage(
+                damage, hitgroup, 0, 0u
+            );
+            if (hostage->health <= damage) {
+                hostage->health = 0u;
+                hostage->active = 0u;
+                if (*money > 2250u) *money -= 2250u;
+                else *money = 0u;
+                add_corpse(
+                    corpses,
+                    hostage->mover.x, hostage->mover.y,
+                    hostage->mover.z,
+                    0u, now
+                );
+                kill_feed->killer = 0u;
+                kill_feed->victim =
+                    (uint8_t)(0x80u + (uint32_t)selected_hostage);
+                kill_feed->weapon = (uint8_t)weapon;
+                kill_feed->headshot = hitgroup == 1u;
+                kill_feed->until = now + 3500u;
+                c15_audio_play(
+                    audio, C15_SOUND_CUE_DEATH,
+                    C15_SOUND_CHANNEL_BOT
+                );
+                return 3;
+            }
+            hostage->health = (uint16_t)(hostage->health - damage);
+            return 1;
+        } else {
+            c15_bot_t *bot = &bots[(uint32_t)selected];
+            damage = apply_hitgroup_damage(
+                damage, hitgroup, &bot->armor, bot->helmet
+            );
+            if (bot->health <= damage) {
+                bot->health = 0u;
+                bot->alive = 0u;
+                ++bot->deaths;
+                *money += 300u;
+                if (*money > 16000u) {
+                    *money = 16000u;
+                }
+                add_corpse(
+                    corpses, bot->mover.x, bot->mover.y,
+                    bot->mover.z, bot->team, now
+                );
+                kill_feed->killer = 0u;
+                kill_feed->victim = (uint8_t)(selected + 1);
+                kill_feed->weapon = (uint8_t)weapon;
+                kill_feed->headshot = hitgroup == 1u;
+                kill_feed->until = now + 3500u;
+                c15_audio_play(
+                    audio, C15_SOUND_CUE_DEATH,
+                    C15_SOUND_CHANNEL_BOT
+                );
+                return 2;
+            }
+            bot->health = (uint16_t)(bot->health - damage);
+        }
     }
     return 1;
 }
@@ -2187,6 +4057,419 @@ static int view_bob_q4(const lite_input_t *input, uint32_t now)
     return bob_q4;
 }
 
+static int project_world_point(
+    const c15_camera_t *camera,
+    int32_t world_x,
+    int32_t world_y,
+    int32_t world_z,
+    int *screen_x,
+    int *screen_y,
+    int32_t *depth_out
+)
+{
+    int32_t dx = world_x - camera->x;
+    int32_t dy = world_y - camera->y;
+    int32_t sine = sin_q14_q8(camera->yaw_q8);
+    int32_t cosine = cos_q14_q8(camera->yaw_q8);
+    int32_t pitch_sine =
+        sin_q14_q8((uint16_t)camera->pitch_q8);
+    int32_t pitch_cosine =
+        cos_q14_q8((uint16_t)camera->pitch_q8);
+    int32_t side = (int32_t)(
+        ((int64_t)sine * dx - (int64_t)cosine * dy) >> 14
+    );
+    int32_t forward = (int32_t)(
+        ((int64_t)cosine * dx + (int64_t)sine * dy) >> 14
+    );
+    int32_t vertical = world_z - camera->z;
+    int32_t view_y = (int32_t)(
+        ((int64_t)pitch_cosine * vertical -
+         (int64_t)pitch_sine * forward) >> 14
+    );
+    int32_t view_z = (int32_t)(
+        ((int64_t)pitch_sine * vertical +
+         (int64_t)pitch_cosine * forward) >> 14
+    );
+    int32_t focal = camera->focal_length != 0u ?
+        camera->focal_length : DEFAULT_FOCAL_LENGTH;
+    if (view_z < 8) {
+        return 0;
+    }
+    *screen_x = (int)LITE_VIEW_WIDTH / 2 +
+        (int)(side * focal / view_z);
+    *screen_y = (int)LITE_VIEW_HEIGHT / 2 -
+        (int)(view_y * focal / view_z);
+    *depth_out = view_z;
+    return *screen_x >= 0 && *screen_x < (int)LITE_VIEW_WIDTH &&
+        *screen_y >= 0 && *screen_y < (int)LITE_VIEW_HEIGHT;
+}
+
+static int world_point_visible(int x, int y, int32_t depth)
+{
+    uint16_t scene_depth;
+    if (x < 0 || x >= (int)LITE_VIEW_WIDTH ||
+        y < 0 || y >= (int)LITE_VIEW_HEIGHT ||
+        depth < 0 || depth > 65535) {
+        return 0;
+    }
+    scene_depth = g_depth[y * LITE_VIEW_WIDTH + x];
+    return scene_depth == 0xffffu ||
+        depth <= (int32_t)scene_depth + 20;
+}
+
+static void draw_world_gameplay(
+    lite_framebuffer_t *fb,
+    const c15_camera_t *camera,
+    const c15_hostage_t hostages[HOSTAGE_MAX],
+    const c15_grenade_t grenades[GRENADE_MAX],
+    const c15_corpse_t corpses[CORPSE_MAX],
+    const c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX],
+    const c15_impact_t impacts[IMPACT_MAX],
+    const c15_bomb_state_t *bomb,
+    uint32_t now
+)
+{
+    uint16_t t_color = lite_rgb565(189u, 116u, 54u);
+    uint16_t ct_color = lite_rgb565(64u, 126u, 190u);
+    uint16_t hostage_color = lite_rgb565(221u, 207u, 151u);
+    uint16_t smoke_color = lite_rgb565(104u, 111u, 105u);
+    uint16_t hot = lite_rgb565(244u, 181u, 46u);
+    uint16_t red = lite_rgb565(235u, 78u, 64u);
+    uint32_t index;
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        int x;
+        int y;
+        int32_t depth;
+        int height;
+        if (!hostages[index].active ||
+            !project_world_point(
+                camera,
+                hostages[index].mover.x,
+                hostages[index].mover.y,
+                hostages[index].mover.z + 38,
+                &x, &y, &depth) ||
+            !world_point_visible(x, y, depth)) {
+            continue;
+        }
+        height = (int)(72 * camera->focal_length / depth);
+        if (height < 7) height = 7;
+        if (height > 60) height = 60;
+        lite_fb_rect(fb, x - height / 8, y - height / 2,
+                     height / 4 + 1, height / 5 + 1,
+                     hostage_color);
+        lite_fb_line(fb, x, y - height / 3, x, y + height / 2,
+                     hostage_color);
+        lite_fb_line(fb, x, y, x - height / 4, y + height / 4,
+                     hostage_color);
+        lite_fb_line(fb, x, y, x + height / 4, y + height / 4,
+                     hostage_color);
+    }
+    for (index = 0u; index < GRENADE_MAX; ++index) {
+        int x;
+        int y;
+        int32_t depth;
+        const c15_grenade_t *grenade = &grenades[index];
+        if (grenade->active == 0u ||
+            !project_world_point(
+                camera, grenade->x_q8 >> 8,
+                grenade->y_q8 >> 8, grenade->z_q8 >> 8,
+                &x, &y, &depth) ||
+            !world_point_visible(x, y, depth)) {
+            continue;
+        }
+        if (grenade->active == 2u) {
+            int radius = (int)(
+                128 * camera->focal_length / depth
+            );
+            if (radius < 8) radius = 8;
+            if (radius > 45) radius = 45;
+            lite_fb_blend_rect(
+                fb, x - radius, y - radius / 2,
+                radius * 2, radius, smoke_color
+            );
+        } else {
+            uint16_t color = grenade->kind == GRENADE_HE ? red :
+                (grenade->kind == GRENADE_FLASH ?
+                    lite_rgb565(236u, 236u, 222u) :
+                    lite_rgb565(112u, 168u, 102u));
+            lite_fb_rect(fb, x - 2, y - 2, 5, 5, color);
+        }
+    }
+    for (index = 0u; index < CORPSE_MAX; ++index) {
+        int x;
+        int y;
+        int32_t depth;
+        int half;
+        uint16_t color;
+        if (!corpses[index].active ||
+            !project_world_point(
+                camera, corpses[index].x, corpses[index].y,
+                corpses[index].z + 4, &x, &y, &depth) ||
+            !world_point_visible(x, y, depth)) {
+            continue;
+        }
+        half = (int)(34 * camera->focal_length / depth);
+        if (half < 3) half = 3;
+        if (half > 32) half = 32;
+        color = corpses[index].team == TEAM_T ?
+            t_color : (corpses[index].team == TEAM_CT ?
+                ct_color : hostage_color);
+        lite_fb_line(fb, x - half, y, x + half, y + half / 3, color);
+        if (now - corpses[index].died_at < 900u) {
+            lite_fb_line(fb, x - half / 2, y - 2,
+                         x + half / 2, y + half / 4, red);
+        }
+    }
+    for (index = 0u; index < DROPPED_WEAPON_MAX; ++index) {
+        int x;
+        int y;
+        int32_t depth;
+        int half;
+        if (!dropped[index].active ||
+            !project_world_point(
+                camera, dropped[index].x, dropped[index].y,
+                dropped[index].z + 4, &x, &y, &depth) ||
+            !world_point_visible(x, y, depth)) {
+            continue;
+        }
+        half = (int)(22 * camera->focal_length / depth);
+        if (half < 3) half = 3;
+        if (half > 20) half = 20;
+        lite_fb_line(fb, x - half, y + 2, x + half, y - 2, hot);
+        lite_fb_line(fb, x, y - 3, x + half / 2, y + 4, hot);
+        if (depth < 220) {
+            lite_fb_text(
+                fb, x - 12, y - 14,
+                g_weapon_labels[dropped[index].weapon], 1, hot
+            );
+        }
+    }
+    for (index = 0u; index < IMPACT_MAX; ++index) {
+        int x;
+        int y;
+        int32_t depth;
+        int radius;
+        const c15_impact_t *impact = &impacts[index];
+        if (!impact->active || time_reached(now, impact->until) ||
+            !project_world_point(
+                camera, impact->x, impact->y, impact->z,
+                &x, &y, &depth) ||
+            !world_point_visible(x, y, depth)) {
+            continue;
+        }
+        radius = impact->kind == 2u ? 12 : 3;
+        lite_fb_line(fb, x - radius, y, x + radius, y,
+                     impact->kind == 1u ? red : hot);
+        lite_fb_line(fb, x, y - radius, x, y + radius,
+                     impact->kind == 1u ? red : hot);
+    }
+    for (index = 0u; index < c15_map_dynamic_count(&g_map); ++index) {
+        c15_dynamic_entity_t entity;
+        int x;
+        int y;
+        int32_t depth;
+        int width;
+        int height;
+        int32_t horizontal_extent;
+        uint16_t color;
+        if (!c15_map_dynamic(&g_map, index, &entity) ||
+            entity.kind == C15_DYNAMIC_BUTTON ||
+            g_map.dynamic_position[index] >= 8u ||
+            (entity.kind == C15_DYNAMIC_BREAKABLE &&
+             (g_map.dynamic_broken_bits & (1u << index)) != 0u) ||
+            !project_world_point(
+                camera,
+                ((int32_t)entity.minimum_x + entity.maximum_x) / 2,
+                ((int32_t)entity.minimum_y + entity.maximum_y) / 2,
+                ((int32_t)entity.minimum_z + entity.maximum_z) / 2 +
+                    (((int32_t)entity.maximum_z - entity.minimum_z) *
+                     g_map.dynamic_position[index] / 8),
+                &x, &y, &depth) ||
+            !world_point_visible(x, y, depth)) {
+            continue;
+        }
+        horizontal_extent =
+            (int32_t)entity.maximum_x - entity.minimum_x;
+        if ((int32_t)entity.maximum_y - entity.minimum_y >
+            horizontal_extent) {
+            horizontal_extent =
+                (int32_t)entity.maximum_y - entity.minimum_y;
+        }
+        width = horizontal_extent * camera->focal_length / depth;
+        height = (entity.maximum_z - entity.minimum_z) *
+            camera->focal_length / depth;
+        if (width < 4) width = 4;
+        if (width > 100) width = 100;
+        if (height < 5) height = 5;
+        if (height > 140) height = 140;
+        color = entity.kind == C15_DYNAMIC_BREAKABLE ?
+            lite_rgb565(144u, 95u, 48u) :
+            lite_rgb565(105u, 112u, 103u);
+        lite_fb_frame(
+            fb, x - width / 2, y - height / 2,
+            width, height, color
+        );
+    }
+    if (bomb->enabled &&
+        ((bomb->planted && !bomb->defused) || bomb->dropped)) {
+        int x;
+        int y;
+        int32_t depth;
+        if (project_world_point(
+                camera, bomb->x, bomb->y, bomb->z + 5,
+                &x, &y, &depth) &&
+            world_point_visible(x, y, depth)) {
+            lite_fb_rect(fb, x - 5, y - 3, 11, 7,
+                         bomb->planted ? red : hot);
+            lite_fb_text(fb, x - 6, y - 13, "C4", 1,
+                         bomb->planted ? red : hot);
+        }
+    }
+}
+
+static void draw_radar(
+    lite_framebuffer_t *fb,
+    const c15_camera_t *camera,
+    const c15_bot_t bots[BOT_COUNT],
+    const c15_hostage_t hostages[HOSTAGE_MAX],
+    const c15_bomb_state_t *bomb,
+    uint8_t player_team
+)
+{
+    uint16_t green = lite_rgb565(82u, 203u, 122u);
+    uint16_t gold = lite_rgb565(244u, 181u, 46u);
+    uint16_t gray = lite_rgb565(182u, 184u, 165u);
+    int32_t sine = sin_q14_q8(camera->yaw_q8);
+    int32_t cosine = cos_q14_q8(camera->yaw_q8);
+    uint32_t index;
+    lite_fb_blend_rect(fb, 4, 25, 49, 49, lite_rgb565(12u, 22u, 22u));
+    lite_fb_frame(fb, 4, 25, 49, 49, green);
+    lite_fb_line(fb, 28, 47, 28, 52, green);
+    for (index = 0u; index < BOT_COUNT; ++index) {
+        int32_t dx;
+        int32_t dy;
+        int32_t side;
+        int32_t forward;
+        int x;
+        int y;
+        if (!bots[index].alive ||
+            bots[index].team != player_team) {
+            continue;
+        }
+        dx = bots[index].mover.x - camera->x;
+        dy = bots[index].mover.y - camera->y;
+        side = (int32_t)(((int64_t)sine * dx -
+                          (int64_t)cosine * dy) >> 14);
+        forward = (int32_t)(((int64_t)cosine * dx +
+                             (int64_t)sine * dy) >> 14);
+        if (side < -800) side = -800;
+        if (side > 800) side = 800;
+        if (forward < -800) forward = -800;
+        if (forward > 800) forward = 800;
+        x = 28 + (int)(side * 21 / 800);
+        y = 49 - (int)(forward * 21 / 800);
+        lite_fb_rect(
+            fb, x - 1, y - 1, 3, 3,
+            green
+        );
+    }
+    for (index = 0u; index < HOSTAGE_MAX; ++index) {
+        int32_t dx;
+        int32_t dy;
+        int32_t side;
+        int32_t forward;
+        int x;
+        int y;
+        if (!hostages[index].active) continue;
+        dx = hostages[index].mover.x - camera->x;
+        dy = hostages[index].mover.y - camera->y;
+        side = (int32_t)(((int64_t)sine * dx -
+                          (int64_t)cosine * dy) >> 14);
+        forward = (int32_t)(((int64_t)cosine * dx +
+                             (int64_t)sine * dy) >> 14);
+        if (side < -800) side = -800;
+        if (side > 800) side = 800;
+        if (forward < -800) forward = -800;
+        if (forward > 800) forward = 800;
+        x = 28 + (int)(side * 21 / 800);
+        y = 49 - (int)(forward * 21 / 800);
+        lite_fb_rect(fb, x, y, 2, 2, gray);
+    }
+    if (bomb->enabled && (bomb->dropped || bomb->planted)) {
+        int32_t dx = bomb->x - camera->x;
+        int32_t dy = bomb->y - camera->y;
+        int32_t side = (int32_t)(
+            ((int64_t)sine * dx - (int64_t)cosine * dy) >> 14
+        );
+        int32_t forward = (int32_t)(
+            ((int64_t)cosine * dx + (int64_t)sine * dy) >> 14
+        );
+        int x;
+        int y;
+        if (side < -800) side = -800;
+        if (side > 800) side = 800;
+        if (forward < -800) forward = -800;
+        if (forward > 800) forward = 800;
+        x = 28 + (int)(side * 21 / 800);
+        y = 49 - (int)(forward * 21 / 800);
+        lite_fb_rect(fb, x - 1, y - 1, 3, 3, gold);
+    }
+}
+
+static void draw_kill_feed(
+    lite_framebuffer_t *fb,
+    const c15_kill_feed_t *feed,
+    uint32_t now
+)
+{
+    uint16_t white = lite_rgb565(238u, 244u, 239u);
+    uint16_t gold = lite_rgb565(244u, 181u, 46u);
+    uint16_t red = lite_rgb565(235u, 78u, 64u);
+    if (!time_active(now, feed->until)) return;
+    lite_fb_blend_rect(fb, 111, 27, 147, 14, lite_rgb565(18u, 31u, 31u));
+    if (feed->killer == 0u) {
+        lite_fb_text(fb, 115, 31, "YOU", 1, gold);
+    } else if (feed->killer == 0xffu) {
+        lite_fb_text(fb, 115, 31, "WORLD", 1, red);
+    } else {
+        lite_fb_text(fb, 115, 31, "BOT", 1, white);
+        lite_fb_u32(fb, 136, 31, feed->killer, 1, white);
+    }
+    lite_fb_text(fb, 158, 31, ">", 1, feed->headshot ? red : gold);
+    if (feed->victim == 0u) {
+        lite_fb_text(fb, 174, 31, "YOU", 1, white);
+    } else if (feed->victim >= 0x80u) {
+        lite_fb_text(fb, 174, 31, "HOSTAGE", 1, white);
+    } else {
+        lite_fb_text(fb, 174, 31, "BOT", 1, white);
+        lite_fb_u32(fb, 195, 31, feed->victim, 1, white);
+    }
+}
+
+static void draw_scope(lite_framebuffer_t *fb)
+{
+    uint16_t black = lite_rgb565(0u, 0u, 0u);
+    uint16_t gray = lite_rgb565(92u, 99u, 91u);
+    lite_fb_rect(fb, 0, 0, 72, LITE_VIEW_HEIGHT, black);
+    lite_fb_rect(fb, 248, 0, 72, LITE_VIEW_HEIGHT, black);
+    lite_fb_rect(fb, 72, 0, 176, 32, black);
+    lite_fb_rect(fb, 72, 208, 176, 32, black);
+    lite_fb_line(fb, 72, 120, 248, 120, gray);
+    lite_fb_line(fb, 160, 32, 160, 208, gray);
+}
+
+static const char *round_reason_label(uint8_t reason)
+{
+    if (reason == ROUND_REASON_TARGET_BOMBED) return "TARGET BOMBED";
+    if (reason == ROUND_REASON_BOMB_DEFUSED) return "BOMB DEFUSED";
+    if (reason == ROUND_REASON_TARGET_SAVED) return "TARGET SAVED";
+    if (reason == ROUND_REASON_HOSTAGES_RESCUED) {
+        return "HOSTAGES RESCUED";
+    }
+    if (reason == ROUND_REASON_TIME_EXPIRED) return "TIME EXPIRED";
+    return "TEAM ELIMINATED";
+}
+
 static void render_game(
     lite_framebuffer_t *fb,
     lite_framebuffer_t *view,
@@ -2197,6 +4480,7 @@ static void render_game(
     const c15_bot_t bots[BOT_COUNT],
     uint8_t player_team,
     uint16_t player_health,
+    uint8_t spectator_target,
     uint32_t money,
     uint32_t round,
     uint32_t rounds_t,
@@ -2211,9 +4495,27 @@ static void render_game(
     uint32_t muzzle_frame,
     uint32_t fire_pose_frame,
     uint32_t ammo,
+    uint32_t reserve_ammo,
+    uint16_t player_armor,
+    uint8_t player_defuse_kit,
+    const uint8_t grenade_counts[GRENADE_KIND_COUNT],
+    const c15_hostage_t hostages[HOSTAGE_MAX],
+    const c15_grenade_t grenades[GRENADE_MAX],
+    const c15_corpse_t corpses[CORPSE_MAX],
+    const c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX],
+    const c15_impact_t impacts[IMPACT_MAX],
+    const c15_kill_feed_t *kill_feed,
     const c15_bomb_state_t *bomb,
+    uint32_t round_deadline,
+    uint32_t freeze_until,
+    uint32_t crosshair_spread_q8,
+    uint32_t flash_until,
+    int zoomed,
+    int silenced,
+    int glock_burst,
     enum game_screen screen,
     uint8_t round_winner,
+    uint8_t round_reason,
     c15_render_stats_t *stats,
     c15_model_render_stats_t *view_stats,
     c15_model_render_stats_t *entity_stats
@@ -2258,33 +4560,65 @@ static void render_game(
             (uint8_t)(bots[index].mover.yaw - 64u),
             entity_stats
         );
-        c15_render_world_model(
-            held, view, g_depth, camera,
-            bots[index].mover.x, bots[index].mover.y,
-            bots[index].mover.z,
-            (uint8_t)(bots[index].mover.yaw - 64u),
-            entity_stats
+        /*
+         * Beyond 900 world units the held weapon is only a few pixels tall.
+         * Keep the animated body silhouette but avoid a second full model
+         * transform/raster pass for detail the 320x240 display cannot show.
+         */
+        if (distance <= 900u * 900u) {
+            c15_render_world_model(
+                held, view, g_depth, camera,
+                bots[index].mover.x, bots[index].mover.y,
+                bots[index].mover.z,
+                (uint8_t)(bots[index].mover.yaw - 64u),
+                entity_stats
+            );
+        }
+    }
+    draw_world_gameplay(
+        fb, camera, hostages, grenades, corpses, dropped,
+        impacts, bomb, now
+    );
+    if (player_health != 0u && !zoomed) {
+        c15_render_view_model(
+            &g_view_model, view, g_depth,
+            &g_weapon_views[weapon],
+            firing ? 6 : 0, bob_q4, view_stats
+        );
+    } else if (player_health != 0u) {
+        bda_memset(view_stats, 0, sizeof(*view_stats));
+        draw_scope(fb);
+    } else {
+        bda_memset(view_stats, 0, sizeof(*view_stats));
+    }
+    {
+        int gap = 4 + (int)(crosshair_spread_q8 / 80u);
+        if (gap > 18) gap = 18;
+        lite_fb_line(
+            fb, 160 - gap - 7, 120, 160 - gap, 120,
+            hit_confirmed ? red : accent
+        );
+        lite_fb_line(
+            fb, 160 + gap, 120, 160 + gap + 7, 120,
+            hit_confirmed ? red : accent
+        );
+        lite_fb_line(
+            fb, 160, 120 - gap - 7, 160, 120 - gap,
+            hit_confirmed ? red : accent
+        );
+        lite_fb_line(
+            fb, 160, 120 + gap, 160, 120 + gap + 7,
+            hit_confirmed ? red : accent
         );
     }
-    c15_render_view_model(
-        &g_view_model, view, g_depth,
-        &g_weapon_views[weapon],
-        firing ? 6 : 0, bob_q4, view_stats
-    );
-    lite_fb_line(
-        fb, 152, 120, 168, 120,
-        hit_confirmed ? red : accent
-    );
-    lite_fb_line(
-        fb, 160, 112, 160, 128,
-        hit_confirmed ? red : accent
-    );
     draw_fps(fb, fps_x10, green, accent);
     lite_fb_text(fb, 4, 15, g_map_labels[map_id], 1, white);
     lite_fb_text(fb, 232, 4, g_weapon_labels[weapon], 1, accent);
     if (weapon != WEAPON_KNIFE) {
         lite_fb_text(fb, 232, 15, "AMMO", 1, white);
         lite_fb_u32(fb, 262, 15, ammo, 1, accent);
+        lite_fb_text(fb, 280, 15, "/", 1, white);
+        lite_fb_u32(fb, 289, 15, reserve_ammo, 1, accent);
     }
     team_counts(
         bots, player_team, player_health, &t_alive, &ct_alive
@@ -2295,6 +4629,18 @@ static void render_game(
     lite_fb_u32(fb, 167, 4, ct_alive, 1, white);
     lite_fb_text(fb, 188, 4, "R", 1, accent);
     lite_fb_u32(fb, 200, 4, round, 1, white);
+    if (round_deadline != 0u) {
+        uint32_t seconds = time_reached(now, round_deadline) ?
+            0u : (round_deadline - now + 999u) / 1000u;
+        lite_fb_u32(fb, 211, 4, seconds / 60u, 1, white);
+        lite_fb_text(fb, 223, 4, ":", 1, white);
+        if (seconds % 60u < 10u) {
+            lite_fb_text(fb, 229, 4, "0", 1, white);
+            lite_fb_u32(fb, 235, 4, seconds % 60u, 1, white);
+        } else {
+            lite_fb_u32(fb, 229, 4, seconds % 60u, 1, white);
+        }
+    }
     if (bomb->enabled) {
         if (bomb->planted && !bomb->defused) {
             uint32_t remaining = time_reached(now, bomb->explode_at) ?
@@ -2307,7 +4653,10 @@ static void render_game(
         if (bomb->action_owner == 1u &&
             bomb->action != BOMB_ACTION_NONE) {
             uint32_t duration = bomb->action == BOMB_ACTION_PLANT ?
-                BOMB_PLANT_MS : BOMB_DEFUSE_MS;
+                BOMB_PLANT_MS : (
+                    player_defuse_kit ?
+                        BOMB_DEFUSE_MS / 2u : BOMB_DEFUSE_MS
+                );
             uint32_t elapsed = now - bomb->action_started;
             int width;
             if (elapsed > duration) elapsed = duration;
@@ -2318,8 +4667,19 @@ static void render_game(
             lite_fb_frame(fb, 74, 198, 128, 14, accent);
             lite_fb_rect(fb, 78, 202, width, 6, accent);
         }
+    } else if (c15_map_hostage_count(&g_map) != 0u) {
+        uint32_t total = c15_map_hostage_count(&g_map);
+        if (total > HOSTAGE_MAX) total = HOSTAGE_MAX;
+        lite_fb_text(fb, 70, 4, "H", 1, accent);
+        lite_fb_u32(
+            fb, 82, 4, hostage_count_rescued(hostages), 1, white
+        );
+        lite_fb_text(fb, 88, 4, "/", 1, white);
+        lite_fb_u32(fb, 94, 4, total, 1, accent);
     }
-    lite_fb_blend_rect(fb, 2, 218, 155, 20, lite_rgb565(18u, 31u, 31u));
+    draw_radar(fb, camera, bots, hostages, bomb, player_team);
+    draw_kill_feed(fb, kill_feed, now);
+    lite_fb_blend_rect(fb, 2, 218, 225, 20, lite_rgb565(18u, 31u, 31u));
     lite_fb_text(fb, 7, 224, "HP", 1, green);
     lite_fb_u32(
         fb, 25, 224, player_health, 1,
@@ -2327,17 +4687,42 @@ static void render_game(
     );
     lite_fb_text(fb, 63, 224, "MONEY", 1, green);
     lite_fb_u32(fb, 99, 224, money, 1, accent);
-    if (firing) {
+    lite_fb_text(fb, 142, 224, "AP", 1, green);
+    lite_fb_u32(fb, 160, 224, player_armor, 1, white);
+    lite_fb_text(fb, 187, 224, "G", 1, green);
+    lite_fb_u32(
+        fb, 199, 224,
+        grenade_counts[0] + grenade_counts[1] + grenade_counts[2],
+        1, accent
+    );
+    if (firing && !zoomed &&
+        !(silenced &&
+          (weapon == WEAPON_USP || weapon == WEAPON_M4A1))) {
         draw_fire_feedback(
             fb, weapon, muzzle_frame, fire_pose_frame,
             6, bob_q4, accent
         );
     }
-    draw_controls(fb, input);
+    draw_controls(
+        fb, input,
+        weapon_alt_label(weapon, zoomed, silenced, glock_burst)
+    );
     if (player_health == 0u) {
-        lite_fb_blend_rect(fb, 72, 92, 176, 44, lite_rgb565(52u, 15u, 15u));
-        lite_fb_frame(fb, 72, 92, 176, 44, red);
-        lite_fb_text(fb, 102, 108, "YOU ARE DEAD", 1, white);
+        lite_fb_blend_rect(fb, 82, 190, 156, 20, lite_rgb565(52u, 15u, 15u));
+        lite_fb_text(fb, 92, 196, "SPECTATING", 1, white);
+        if (spectator_target < BOT_COUNT) {
+            lite_fb_text(fb, 164, 196, "BOT", 1, accent);
+            lite_fb_u32(
+                fb, 185, 196, spectator_target + 1u, 1, accent
+            );
+        }
+    }
+    if (time_active(now, freeze_until)) {
+        uint32_t seconds = (freeze_until - now + 999u) / 1000u;
+        lite_fb_blend_rect(fb, 74, 82, 172, 42, lite_rgb565(17u, 24u, 21u));
+        lite_fb_frame(fb, 74, 82, 172, 42, accent);
+        lite_fb_text(fb, 99, 93, "FREEZE TIME", 1, accent);
+        lite_fb_u32(fb, 151, 109, seconds, 1, white);
     }
     if (screen == SCREEN_ROUND_END) {
         lite_fb_blend_rect(fb, 55, 80, 210, 64, lite_rgb565(17u, 24u, 21u));
@@ -2348,7 +4733,16 @@ static void render_game(
                 "TERRORISTS WIN" : "COUNTER-TERRORISTS WIN",
             1, accent
         );
-        lite_fb_text(fb, 98, 119, "NEXT ROUND", 1, white);
+        lite_fb_text(
+            fb, 100, 113, round_reason_label(round_reason), 1, white
+        );
+        lite_fb_text(fb, 116, 129, "NEXT ROUND", 1, white);
+    }
+    if (time_active(now, flash_until)) {
+        lite_fb_rect(
+            fb, 0, 0, LITE_VIEW_WIDTH, LITE_VIEW_HEIGHT,
+            lite_rgb565(255u, 255u, 245u)
+        );
     }
     if ((input->down & LITE_INPUT_SCORE) != 0u) {
         draw_scoreboard(
@@ -2372,10 +4766,11 @@ static uint32_t menu_touch_item(
         if (y >= 122 && y < 160) return 1u;
         if (y >= 166 && y < 207) return 2u;
     } else if (screen == SCREEN_MAP) {
-        if (y >= 80 && y < 114) return 0u;
-        if (y >= 112 && y < 146) return 1u;
-        if (y >= 144 && y < 179) return 2u;
-        if (y >= 184 && y < 218) return 3u;
+        if (y >= 80 && y < 218) {
+            uint32_t item = map_window_start(selection) +
+                (uint32_t)((y - 80) / 27);
+            if (item <= MAP_COUNT) return item;
+        }
     } else if (screen == SCREEN_TEAM) {
         if (y >= 78 && y < 120) return 0u;
         if (y >= 118 && y < 160) return 1u;
@@ -2385,7 +4780,7 @@ static uint32_t menu_touch_item(
         if (y >= 86 && y < 226) {
             uint32_t row = (uint32_t)(y - 86) / 27u;
             uint32_t item = buy_window_start(selection) + row;
-            return item <= WEAPON_COUNT ? item : 0xffffffffu;
+            return item < BUY_ITEM_COUNT ? item : 0xffffffffu;
         }
     }
     return 0xffffffffu;
@@ -2417,6 +4812,12 @@ int bda_main(void)
     c15_player_t player;
     c15_bot_t bots[BOT_COUNT];
     c15_bomb_state_t bomb;
+    c15_hostage_t hostages[HOSTAGE_MAX];
+    c15_grenade_t grenades[GRENADE_MAX];
+    c15_corpse_t corpses[CORPSE_MAX];
+    c15_dropped_weapon_t dropped[DROPPED_WEAPON_MAX];
+    c15_impact_t impacts[IMPACT_MAX];
+    c15_kill_feed_t kill_feed;
     c15_render_stats_t stats = {0};
     c15_model_render_stats_t view_stats = {0};
     c15_model_render_stats_t entity_stats = {0};
@@ -2435,6 +4836,8 @@ int bda_main(void)
     uint32_t fps_last_frame;
     uint32_t frame = 0u;
     uint32_t fps_x10 = 0u;
+    uint32_t render_ms_x10 = 0u;
+    uint32_t present_ms_x10 = 0u;
     uint32_t pending_controls = 0u;
     uint32_t map_id = MAP_DE_DUST2;
     uint32_t weapon = WEAPON_GLOCK;
@@ -2451,39 +4854,82 @@ int bda_main(void)
     uint32_t round = 1u;
     uint32_t round_end_at = 0u;
     uint32_t round_deadline = 0u;
+    uint32_t buy_deadline = 0u;
+    uint32_t freeze_until = 0u;
+    uint32_t flash_until = 0u;
+    uint32_t next_step_sound = 0u;
+    uint32_t weapon_press_started = 0u;
+    uint32_t burst_next_fire = 0u;
+    uint32_t crosshair_spread_q8 = 0u;
+    uint32_t recoil_q8 = 0u;
     uint32_t rounds_t = 0u;
     uint32_t rounds_ct = 0u;
     uint32_t player_kills = 0u;
     uint32_t player_deaths = 0u;
     uint32_t reload_weapon = WEAPON_GLOCK;
     uint16_t weapon_ammo[WEAPON_COUNT];
+    uint16_t weapon_reserve[WEAPON_COUNT];
     uint8_t owned[WEAPON_COUNT];
+    uint8_t grenade_counts[GRENADE_KIND_COUNT];
     uint8_t player_team = TEAM_T;
     uint8_t bot_difficulty = BOT_EASY;
     uint8_t audio_enabled = 1u;
     uint16_t player_health = 100u;
+    uint16_t player_armor = 0u;
     uint8_t round_winner = 0u;
+    uint8_t round_reason = ROUND_REASON_NONE;
+    uint8_t spectator_target = 0xffu;
+    uint8_t last_bot_alive[BOT_COUNT];
+    uint8_t player_was_alive = 0u;
+    uint8_t weapon_hold_consumed = 0u;
+    uint8_t player_helmet = 0u;
+    uint8_t player_defuse_kit = 0u;
+    uint8_t burst_remaining = 0u;
+    uint16_t shot_seed = 0x5a3du;
     int previous_touch_down = 0;
     int game_loaded = 0;
     int reloading = 0;
+    int zoomed = 0;
+    int silenced = 0;
+    int glock_burst = 0;
+    int pending_alt_attack = 0;
     int running = 1;
     size_t persistent_models = 0u;
+    uint8_t *map_memory = 0;
+    uint32_t map_memory_bytes = 0u;
 
     bda_memset(&input, 0, sizeof(input));
     bda_memset(&audio, 0, sizeof(audio));
+    bda_memset(&camera, 0, sizeof(camera));
     bda_memset(&player, 0, sizeof(player));
     bda_memset(bots, 0, sizeof(bots));
     bda_memset(&bomb, 0, sizeof(bomb));
+    bda_memset(hostages, 0, sizeof(hostages));
+    bda_memset(grenades, 0, sizeof(grenades));
+    bda_memset(corpses, 0, sizeof(corpses));
+    bda_memset(dropped, 0, sizeof(dropped));
+    bda_memset(last_bot_alive, 0, sizeof(last_bot_alive));
+    bda_memset(impacts, 0, sizeof(impacts));
+    bda_memset(&kill_feed, 0, sizeof(kill_feed));
     bda_memset(weapon_ammo, 0, sizeof(weapon_ammo));
+    bda_memset(weapon_reserve, 0, sizeof(weapon_reserve));
     bda_memset(owned, 0, sizeof(owned));
+    bda_memset(grenade_counts, 0, sizeof(grenade_counts));
+    camera.focal_length = DEFAULT_FOCAL_LENGTH;
     lite_log_reset();
-    lite_log_line("CS15 Lite M12 start");
-    lite_log_line("game_flow=maps-full-buy-c4-scoreboard");
-    lite_log_line("bot_ai=range-strafe-burst");
+    lite_log_line("CS15 Lite M15 classic rounds start");
+    lite_log_line(
+        "game_flow=freeze-buy-drops-spectator-objectives-scoreboard"
+    );
+    lite_log_line("renderer=fast-clip-scanline-direct-tile");
+    lite_log_line(
+        "bot_ai=roles-routes-last-seen-range-strafe-burst-grenades"
+    );
+    lite_log_line("map_memory=per-map-runtime-allocation");
     lite_log_line("bot_animation=goldsrc-hybrid-walk");
     lite_log_line("muzzle_flash=historical_additive_sprite");
     lite_log_line("audio=historical_pcm-stream");
-    lite_arena_init(&map_arena, g_map_memory, sizeof(g_map_memory));
+    lite_arena_init(&map_arena, 0, 0u);
     lite_arena_init(
         &texture_arena, g_texture_memory, sizeof(g_texture_memory)
     );
@@ -2540,6 +4986,16 @@ int bda_main(void)
         previous_touch_down = input.touch_down;
         if (lite_platform_touch_debug_take(&touch_debug)) {
             log_touch_gesture(&touch_debug);
+        }
+        if (screen == SCREEN_BUY && game_loaded &&
+            buy_deadline != 0u &&
+            time_reached(now, buy_deadline)) {
+            screen = SCREEN_PLAY;
+            selection = 0u;
+            next_logic = now;
+            if (round_deadline == 0u) {
+                round_deadline = freeze_until + ROUND_TIME_MS;
+            }
         }
 
         if (screen == SCREEN_MAIN || screen == SCREEN_OPTIONS ||
@@ -2639,6 +5095,30 @@ int bda_main(void)
                         }
                         weapon = player_team == TEAM_T ?
                             WEAPON_GLOCK : WEAPON_USP;
+                        if (map_memory) {
+                            bda_free(map_memory);
+                            map_memory = 0;
+                        }
+                        map_memory_bytes = g_map_arena_bytes[map_id];
+                        map_memory = (uint8_t *)bda_alloc(map_memory_bytes);
+                        if (!map_memory) {
+                            draw_loading(
+                                &framebuffer, "NOT ENOUGH MAP MEMORY",
+                                lite_rgb565(235u, 78u, 64u)
+                            );
+                            (void)lite_platform_present(g_screen);
+                            lite_log_u32(
+                                "map_alloc_failed", map_memory_bytes
+                            );
+                            running = 0;
+                            continue;
+                        }
+                        lite_arena_init(
+                            &map_arena, map_memory, map_memory_bytes
+                        );
+                        lite_log_u32(
+                            "map_alloc_bytes", map_memory_bytes
+                        );
                         if (!load_game_resources(
                                 &map_arena, &texture_arena, &model_arena,
                                 &persistent_models, &weapon,
@@ -2649,6 +5129,7 @@ int bda_main(void)
                             );
                             (void)lite_platform_present(g_screen);
                             lite_log_line("resource load failed");
+                            lite_log_flush();
                             while (lite_platform_pump(&input)) {
                                 lite_platform_delay(1u);
                             }
@@ -2659,6 +5140,17 @@ int bda_main(void)
                         bda_memset(
                             weapon_ammo, 0, sizeof(weapon_ammo)
                         );
+                        bda_memset(
+                            weapon_reserve, 0, sizeof(weapon_reserve)
+                        );
+                        bda_memset(
+                            grenade_counts, 0, sizeof(grenade_counts)
+                        );
+                        bda_memset(grenades, 0, sizeof(grenades));
+                        bda_memset(corpses, 0, sizeof(corpses));
+                        bda_memset(dropped, 0, sizeof(dropped));
+                        bda_memset(impacts, 0, sizeof(impacts));
+                        bda_memset(&kill_feed, 0, sizeof(kill_feed));
                         owned[WEAPON_KNIFE] = 1u;
                         owned[WEAPON_GLOCK] =
                             player_team == TEAM_T;
@@ -2669,14 +5161,49 @@ int bda_main(void)
                             bot_difficulty, map_id, now,
                             &player_health
                         );
+                        freeze_until = now + FREEZE_TIME_MS;
+                        round_reason = ROUND_REASON_NONE;
+                        spectator_target = 0xffu;
+                        player_was_alive = 1u;
+                        {
+                            uint32_t bot_index;
+                            for (bot_index = 0u;
+                                 bot_index < BOT_COUNT; ++bot_index) {
+                                last_bot_alive[bot_index] =
+                                    bots[bot_index].alive;
+                            }
+                        }
+                        initialize_hostages(hostages);
+                        g_map.dynamic_open_bits = 0u;
+                        g_map.dynamic_broken_bits = 0u;
+                        bda_memset(
+                            g_map.dynamic_damage, 0,
+                            sizeof(g_map.dynamic_damage)
+                        );
+                        bda_memset(
+                            g_map.dynamic_position, 0,
+                            sizeof(g_map.dynamic_position)
+                        );
                         t_animation.action = 0xffu;
                         ct_animation.action = 0xffu;
                         update_world_animations(
                             &t_animation, &ct_animation, bots, now
                         );
                         c15_player_camera(&player, &camera);
+                        camera.focal_length = DEFAULT_FOCAL_LENGTH;
                         weapon_ammo[weapon] =
                             g_weapon_capacity[weapon];
+                        weapon_reserve[weapon] =
+                            g_weapon_reserve_max[weapon] / 2u;
+                        player_armor = 0u;
+                        player_helmet = 0u;
+                        player_defuse_kit = 0u;
+                        zoomed = 0;
+                        silenced = 0;
+                        glock_burst = 0;
+                        burst_remaining = 0u;
+                        recoil_q8 = 0u;
+                        flash_until = 0u;
                         reloading = 0;
                         start_view_animation(
                             &view_animation,
@@ -2685,8 +5212,10 @@ int bda_main(void)
                         game_loaded = 1;
                         screen = SCREEN_BUY;
                         selection = weapon;
-                        menu_count = WEAPON_COUNT + 1u;
+                        menu_count = BUY_ITEM_COUNT;
                         next_logic = now;
+                        buy_deadline = now + BUY_TIME_MS;
+                        round_deadline = 0u;
                         lite_log_u32("pak_bytes", g_pak.file_size);
                         lite_log_u32("map_id", map_id);
                         lite_log_u32(
@@ -2706,10 +5235,17 @@ int bda_main(void)
                     }
                 } else if (screen == SCREEN_BUY) {
                     if (activated < WEAPON_COUNT) {
-                        if (!owned[activated] &&
+                        if (weapon_allowed_for_team(
+                                activated, player_team) &&
+                            (!owned[activated] ||
+                             weapon_ammo[activated] == 0u) &&
                             money >= g_weapon_price[activated]) {
                             money -= g_weapon_price[activated];
-                            owned[activated] = 1u;
+                            own_weapon_in_slot(owned, activated);
+                            weapon_ammo[activated] =
+                                g_weapon_capacity[activated];
+                            weapon_reserve[activated] =
+                                g_weapon_reserve_max[activated];
                         }
                         if (owned[activated]) {
                             change_weapon(
@@ -2717,19 +5253,92 @@ int bda_main(void)
                                 &weapon, activated
                             );
                             reloading = 0;
+                            zoomed = 0;
+                            silenced = 0;
+                            pending_alt_attack = 0;
+                            camera.focal_length =
+                                DEFAULT_FOCAL_LENGTH;
                             start_view_animation(
                                 &view_animation,
                                 C15_VIEW_ANIMATION_DRAW, now
                             );
-                            weapon_ammo[activated] =
-                                g_weapon_capacity[activated];
                         }
-                    } else {
+                    } else if (activated == BUY_ITEM_START) {
                         screen = SCREEN_PLAY;
                         selection = 0u;
                         next_logic = now;
                         if (round_deadline == 0u) {
-                            round_deadline = now + ROUND_TIME_MS;
+                            round_deadline =
+                                freeze_until + ROUND_TIME_MS;
+                        }
+                    } else {
+                        uint32_t price =
+                            equipment_price(
+                                activated, player_armor
+                            );
+                        int allowed = 1;
+                        if (activated == BUY_ITEM_DEFUSE &&
+                            player_team != TEAM_CT) {
+                            allowed = 0;
+                        }
+                        if (activated == BUY_ITEM_HE &&
+                            grenade_counts[GRENADE_HE] >= 1u) {
+                            allowed = 0;
+                        }
+                        if (activated == BUY_ITEM_FLASH &&
+                            grenade_counts[GRENADE_FLASH] >= 2u) {
+                            allowed = 0;
+                        }
+                        if (activated == BUY_ITEM_SMOKE &&
+                            grenade_counts[GRENADE_SMOKE] >= 1u) {
+                            allowed = 0;
+                        }
+                        if (activated == BUY_ITEM_ARMOR &&
+                            player_armor >= 100u) {
+                            allowed = 0;
+                        }
+                        if (activated == BUY_ITEM_HELMET &&
+                            player_helmet) {
+                            allowed = 0;
+                        }
+                        if (activated == BUY_ITEM_DEFUSE &&
+                            player_defuse_kit) {
+                            allowed = 0;
+                        }
+                        if (allowed && money >= price) {
+                            money -= price;
+                            if (activated == BUY_ITEM_HE) {
+                                ++grenade_counts[GRENADE_HE];
+                            } else if (activated == BUY_ITEM_FLASH) {
+                                ++grenade_counts[GRENADE_FLASH];
+                            } else if (activated == BUY_ITEM_SMOKE) {
+                                ++grenade_counts[GRENADE_SMOKE];
+                            } else if (activated == BUY_ITEM_ARMOR) {
+                                player_armor = 100u;
+                                c15_audio_play(
+                                    &audio, C15_SOUND_CUE_ARMOR,
+                                    C15_SOUND_CHANNEL_PLAYER
+                                );
+                            } else if (activated == BUY_ITEM_HELMET) {
+                                player_helmet = 1u;
+                                if (player_armor < 100u) {
+                                    player_armor = 100u;
+                                }
+                            } else if (activated == BUY_ITEM_DEFUSE) {
+                                player_defuse_kit = 1u;
+                            } else if (activated == BUY_ITEM_AMMO) {
+                                uint32_t ammo_weapon;
+                                for (ammo_weapon = 0u;
+                                     ammo_weapon < WEAPON_COUNT;
+                                     ++ammo_weapon) {
+                                    if (owned[ammo_weapon]) {
+                                        weapon_reserve[ammo_weapon] =
+                                            g_weapon_reserve_max[
+                                                ammo_weapon
+                                            ];
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2741,39 +5350,111 @@ int bda_main(void)
             );
             if (completed_animation == C15_VIEW_ANIMATION_RELOAD &&
                 reloading) {
-                weapon_ammo[reload_weapon] =
-                    g_weapon_capacity[reload_weapon];
+                complete_reload(
+                    reload_weapon, weapon_ammo, weapon_reserve
+                );
                 reloading = 0;
             }
-            if (input.touch_dx != 0 || input.touch_dy != 0) {
+            if (player_health != 0u &&
+                (input.touch_dx != 0 || input.touch_dy != 0)) {
                 c15_player_look(
                     &player, input.touch_dx, input.touch_dy
                 );
                 c15_player_camera(&player, &camera);
             }
+            if (screen == SCREEN_PLAY && player_health == 0u &&
+                (input.pressed & LITE_INPUT_FIRE) != 0u) {
+                spectator_target = next_spectator_target(
+                    bots, player_team, spectator_target
+                );
+            }
             if (screen == SCREEN_PLAY) {
                 bomb_player_update(
                     &bomb, &player, player_team, player_health,
-                    &input, now, &audio
+                    player_defuse_kit, &input, now, &audio
                 );
             }
             if (screen == SCREEN_PLAY &&
                 (input.pressed & LITE_INPUT_USE) != 0u &&
                 player_health != 0u &&
                 bomb.action_owner != 1u) {
-                screen = SCREEN_BUY;
-                selection = 0u;
-                menu_count = WEAPON_COUNT + 1u;
+                int used = pickup_weapon(
+                    dropped, &player, owned,
+                    weapon_ammo, weapon_reserve, &weapon, now
+                );
+                if (used) {
+                    change_weapon(
+                        &model_arena, persistent_models,
+                        &weapon, weapon
+                    );
+                    reloading = 0;
+                    zoomed = 0;
+                    silenced = 0;
+                    camera.focal_length = DEFAULT_FOCAL_LENGTH;
+                    start_view_animation(
+                        &view_animation,
+                        C15_VIEW_ANIMATION_DRAW, now
+                    );
+                }
+                if (!used) {
+                    used = hostage_player_use(
+                        hostages, &player, player_team, &audio
+                    );
+                }
+                if (!used) {
+                    used = c15_map_use_dynamic(
+                        &g_map, player.x, player.y, player.z + 28
+                    );
+                }
+                if (!used &&
+                    time_active(now, buy_deadline) &&
+                    c15_map_in_buy_zone(
+                        &g_map, player_team,
+                        player.x, player.y, player.z)) {
+                    screen = SCREEN_BUY;
+                    selection = weapon;
+                    menu_count = BUY_ITEM_COUNT;
+                }
             }
             if (screen == SCREEN_PLAY &&
                 (input.pressed & LITE_INPUT_JUMP) != 0u) {
                 pending_controls |= C15_MOVE_JUMP;
             }
-            if (screen == SCREEN_PLAY &&
+            if (screen == SCREEN_PLAY && player_health != 0u &&
                 (input.pressed & LITE_INPUT_WEAPON) != 0u) {
+                weapon_press_started = now;
+                weapon_hold_consumed = 0u;
+            }
+            if (screen == SCREEN_PLAY && player_health != 0u &&
+                !weapon_hold_consumed &&
+                (input.down & LITE_INPUT_WEAPON) != 0u &&
+                time_reached(now, weapon_press_started + 700u) &&
+                weapon != WEAPON_KNIFE) {
+                drop_weapon(
+                    dropped, weapon, weapon_ammo[weapon],
+                    weapon_reserve[weapon],
+                    player.x, player.y, player.z, now
+                );
+                owned[weapon] = 0u;
+                weapon_ammo[weapon] = 0u;
+                weapon_reserve[weapon] = 0u;
+                change_weapon(
+                    &model_arena, persistent_models,
+                    &weapon, WEAPON_KNIFE
+                );
+                weapon_hold_consumed = 1u;
+                reloading = 0;
+                start_view_animation(
+                    &view_animation, C15_VIEW_ANIMATION_DRAW, now
+                );
+            }
+            if (screen == SCREEN_PLAY && player_health != 0u &&
+                !weapon_hold_consumed &&
+                (input.released & LITE_INPUT_WEAPON) != 0u) {
                 uint32_t candidate = weapon;
                 do {
-                    candidate = (candidate + 1u) % WEAPON_COUNT;
+                    candidate =
+                        (candidate + 1u) % WEAPON_COUNT;
                 } while (!owned[candidate]);
                 change_weapon(
                     &model_arena, persistent_models,
@@ -2783,13 +5464,19 @@ int bda_main(void)
                 start_view_animation(
                     &view_animation, C15_VIEW_ANIMATION_DRAW, now
                 );
+                zoomed = 0;
+                silenced = 0;
+                pending_alt_attack = 0;
+                camera.focal_length = DEFAULT_FOCAL_LENGTH;
+                burst_remaining = 0u;
                 fire_until = 0u;
                 fire_started = 0u;
             }
             if (screen == SCREEN_PLAY &&
                 (input.pressed & LITE_INPUT_RELOAD) != 0u &&
                 weapon != WEAPON_KNIFE &&
-                weapon_ammo[weapon] < g_weapon_capacity[weapon]) {
+                weapon_ammo[weapon] < g_weapon_capacity[weapon] &&
+                weapon_reserve[weapon] != 0u) {
                 reload_weapon = weapon;
                 reloading = 1;
                 start_view_animation(
@@ -2801,61 +5488,227 @@ int bda_main(void)
                 );
             }
             if (screen == SCREEN_PLAY && player_health != 0u &&
-                !reloading &&
-                (input.down & LITE_INPUT_FIRE) != 0u &&
-                time_reached(now, next_fire) &&
-                ((input.pressed & LITE_INPUT_FIRE) != 0u ||
-                 g_weapon_automatic[weapon]) &&
-                (weapon == WEAPON_KNIFE ||
-                 weapon_ammo[weapon] != 0u)) {
-                if (weapon != WEAPON_KNIFE) {
-                    --weapon_ammo[weapon];
-                }
-                ++shots_fired;
-                c15_audio_play(
-                    &audio, weapon, C15_SOUND_CHANNEL_PLAYER
-                );
-                start_view_animation(
-                    &view_animation, C15_VIEW_ANIMATION_FIRE, now
-                );
-                {
-                    int hit = player_fire_hit(
-                        bots, &camera, player_team, weapon, &money
+                (input.pressed & LITE_INPUT_ALT) != 0u) {
+                if (weapon == WEAPON_KNIFE) {
+                    pending_alt_attack = 1;
+                } else if (weapon == WEAPON_GLOCK) {
+                    glock_burst ^= 1;
+                    burst_remaining = 0u;
+                } else if (weapon == WEAPON_USP ||
+                           weapon == WEAPON_M4A1) {
+                    silenced ^= 1;
+                    start_view_animation(
+                        &view_animation,
+                        C15_VIEW_ANIMATION_DRAW, now
                     );
-                    if (hit != 0) {
+                } else if (weapon == WEAPON_SG552 ||
+                           weapon == WEAPON_AUG ||
+                           weapon == WEAPON_SCOUT ||
+                           weapon == WEAPON_AWP ||
+                           weapon == WEAPON_G3SG1 ||
+                           weapon == WEAPON_SG550) {
+                    zoomed ^= 1;
+                    camera.focal_length = zoomed ?
+                        ZOOM_FOCAL_LENGTH : DEFAULT_FOCAL_LENGTH;
+                } else {
+                    uint32_t kind;
+                    for (kind = 0u;
+                         kind < GRENADE_KIND_COUNT; ++kind) {
+                        if (grenade_counts[kind] != 0u &&
+                            throw_grenade(
+                                grenades, (uint8_t)kind,
+                                player_team, 0u, &camera, now)) {
+                            --grenade_counts[kind];
+                            break;
+                        }
+                    }
+                }
+            }
+            if (weapon == WEAPON_GLOCK && glock_burst &&
+                (input.pressed & LITE_INPUT_FIRE) != 0u &&
+                burst_remaining == 0u) {
+                burst_remaining = 3u;
+                burst_next_fire = now;
+            }
+            {
+                int secondary_attack = pending_alt_attack;
+                int fire_requested = secondary_attack;
+                if (burst_remaining != 0u &&
+                    time_reached(now, burst_next_fire)) {
+                    fire_requested = 1;
+                } else if (!glock_burst ||
+                           weapon != WEAPON_GLOCK) {
+                    fire_requested =
+                        (input.down & LITE_INPUT_FIRE) != 0u &&
+                        ((input.pressed & LITE_INPUT_FIRE) != 0u ||
+                         g_weapon_automatic[weapon]);
+                }
+                if (screen == SCREEN_PLAY &&
+                    player_health != 0u &&
+                    !time_active(now, freeze_until) &&
+                    !reloading &&
+                    fire_requested &&
+                    time_reached(now, next_fire) &&
+                    (weapon == WEAPON_KNIFE ||
+                     weapon_ammo[weapon] != 0u)) {
+                    uint32_t pellet;
+                    uint32_t spread = g_weapon_spread_q8[weapon] +
+                        recoil_q8;
+                    int any_hit = 0;
+                    if ((input.down & (LITE_INPUT_UP |
+                                      LITE_INPUT_DOWN |
+                                      LITE_INPUT_LEFT |
+                                      LITE_INPUT_RIGHT)) != 0u) {
+                        spread += g_weapon_spread_q8[weapon] / 2u;
+                    }
+                    if (weapon == WEAPON_SG552 ||
+                        weapon == WEAPON_AUG ||
+                        weapon == WEAPON_SCOUT ||
+                        weapon == WEAPON_AWP ||
+                        weapon == WEAPON_G3SG1 ||
+                        weapon == WEAPON_SG550) {
+                        spread = zoomed ? spread / 3u :
+                            spread * 4u;
+                    }
+                    if (silenced &&
+                        (weapon == WEAPON_USP ||
+                         weapon == WEAPON_M4A1)) {
+                        spread = spread * 3u / 4u;
+                    }
+                    if (weapon != WEAPON_KNIFE) {
+                        --weapon_ammo[weapon];
+                    }
+                    ++shots_fired;
+                    c15_audio_play(
+                        &audio, weapon, C15_SOUND_CHANNEL_PLAYER
+                    );
+                    start_view_animation(
+                        &view_animation,
+                        C15_VIEW_ANIMATION_FIRE, now
+                    );
+                    for (pellet = 0u;
+                         pellet < g_weapon_pellets[weapon]; ++pellet) {
+                        int32_t random_yaw =
+                            (int32_t)next_random(&shot_seed) - 32768;
+                        int32_t random_pitch =
+                            (int32_t)next_random(&shot_seed) - 32768;
+                        uint16_t shot_yaw = (uint16_t)(
+                            camera.yaw_q8 +
+                            random_yaw * (int32_t)spread / 32768
+                        );
+                        int16_t shot_pitch = (int16_t)(
+                            camera.pitch_q8 +
+                            random_pitch * (int32_t)spread / 32768
+                        );
+                        int hit = player_fire_hit(
+                            bots, hostages, &camera,
+                            player_team, weapon,
+                            shot_yaw, shot_pitch, secondary_attack,
+                            &money, corpses, impacts, &kill_feed,
+                            now, &audio
+                        );
+                        if (hit != 0) any_hit = 1;
+                        if (hit == 2) ++player_kills;
+                    }
+                    if (any_hit) {
                         ++shots_hit;
                         hit_until = now + HIT_FEEDBACK_MS;
                     }
-                    if (hit == 2) {
-                        ++player_kills;
+                    recoil_q8 += g_weapon_recoil_q8[weapon];
+                    if (recoil_q8 > 1000u) recoil_q8 = 1000u;
+                    if (weapon != WEAPON_KNIFE) {
+                        int32_t pitch = player.pitch_q8 -
+                            (int32_t)g_weapon_recoil_q8[weapon] / 4;
+                        if (pitch < -(32 * 256)) pitch = -(32 * 256);
+                        player.pitch_q8 = (int16_t)pitch;
+                        player.pitch = (int8_t)(pitch >> 8);
+                        c15_player_camera(&player, &camera);
                     }
+                    crosshair_spread_q8 = spread;
+                    fire_started = now;
+                    fire_until = now + FIRE_FEEDBACK_MS;
+                    if (burst_remaining != 0u) {
+                        --burst_remaining;
+                        burst_next_fire = now + 90u;
+                        next_fire = burst_remaining != 0u ?
+                            burst_next_fire :
+                            now + g_weapon_interval_ms[weapon];
+                    } else {
+                        next_fire = now + (
+                            secondary_attack &&
+                            weapon == WEAPON_KNIFE ?
+                                900u :
+                                g_weapon_interval_ms[weapon]
+                        );
+                    }
+                    pending_alt_attack = 0;
                 }
-                fire_started = now;
-                fire_until = now + FIRE_FEEDBACK_MS;
-                next_fire = now + g_weapon_interval_ms[weapon];
             }
             while (screen == SCREEN_PLAY &&
                    time_reached(now, next_logic) &&
                    logic_steps < 4u) {
                 uint32_t t_alive;
                 uint32_t ct_alive;
-                if (player_health != 0u) {
+                if (player_health != 0u &&
+                    !time_active(now, freeze_until)) {
+                    int32_t old_x = player.x;
+                    int32_t old_y = player.y;
                     c15_player_step(
                         &player, &g_map,
                         movement_controls(&input) | pending_controls
                     );
                     pending_controls = 0u;
                     c15_player_camera(&player, &camera);
+                    if ((player.x != old_x || player.y != old_y) &&
+                        time_reached(now, next_step_sound) &&
+                        audio.voices[
+                            C15_SOUND_CHANNEL_PLAYER
+                        ].remaining == 0u) {
+                        c15_audio_play(
+                            &audio, C15_SOUND_CUE_FOOTSTEP,
+                            C15_SOUND_CHANNEL_PLAYER
+                        );
+                        next_step_sound = now + 360u;
+                    }
                 }
-                bot_sound_weapon = WEAPON_COUNT;
-                bot_logic(
-                    bots, &player, player_team,
-                    &player_health, bot_difficulty, map_id, &bomb, now,
-                    &bot_shots, &bot_hits, &bot_sound_weapon,
-                    &player_deaths
+                if (recoil_q8 > 38u) recoil_q8 -= 38u;
+                else recoil_q8 = 0u;
+                crosshair_spread_q8 = recoil_q8;
+                c15_map_dynamic_tick(&g_map);
+                hostage_logic(
+                    hostages, bots, &player, player_team
                 );
+                grenade_logic(
+                    grenades, bots, hostages, player_team,
+                    &player_health, &player_armor, player_helmet,
+                    &player, &flash_until, corpses, impacts,
+                    &kill_feed, &money, &player_kills,
+                    &player_deaths, &audio, now
+                );
+                bot_sound_weapon = WEAPON_COUNT;
+                {
+                    uint16_t health_before_bots = player_health;
+                if (!time_active(now, freeze_until)) {
+                    bot_logic(
+                        bots, grenades, hostages, &player, player_team,
+                        &player_health, &player_armor, player_helmet,
+                        bot_difficulty, map_id, &bomb, now,
+                        &bot_shots, &bot_hits, &bot_sound_weapon,
+                        &player_deaths, corpses, &kill_feed
+                    );
+                }
+                    if (player_health < health_before_bots) {
+                        c15_audio_play(
+                            &audio,
+                            player_health == 0u ?
+                                C15_SOUND_CUE_DEATH :
+                                C15_SOUND_CUE_PAIN,
+                            C15_SOUND_CHANNEL_PLAYER
+                        );
+                    }
+                }
                 bomb_bot_update(
-                    &bomb, bots, player_team, player_health,
+                    &bomb, bots, &player, player_team, player_health,
                     now, &audio
                 );
                 if (bomb.planted && !bomb.defused &&
@@ -2872,6 +5725,44 @@ int bda_main(void)
                         C15_SOUND_CHANNEL_BOT
                     );
                 }
+                if (player_was_alive && player_health == 0u) {
+                    drop_weapon(
+                        dropped, weapon, weapon_ammo[weapon],
+                        weapon_reserve[weapon],
+                        player.x, player.y, player.z, now
+                    );
+                    if (weapon != WEAPON_KNIFE) {
+                        owned[weapon] = 0u;
+                        weapon_ammo[weapon] = 0u;
+                        weapon_reserve[weapon] = 0u;
+                    }
+                    spectator_target = next_spectator_target(
+                        bots, player_team, 0xffu
+                    );
+                }
+                player_was_alive = player_health != 0u;
+                {
+                    uint32_t bot_index;
+                    for (bot_index = 0u;
+                         bot_index < BOT_COUNT; ++bot_index) {
+                        if (last_bot_alive[bot_index] &&
+                            !bots[bot_index].alive) {
+                            drop_weapon(
+                                dropped, bots[bot_index].weapon,
+                                bots[bot_index].ammo,
+                                g_weapon_reserve_max[
+                                    bots[bot_index].weapon
+                                ] / 2u,
+                                bots[bot_index].mover.x,
+                                bots[bot_index].mover.y,
+                                bots[bot_index].mover.z, now
+                            );
+                        }
+                        last_bot_alive[bot_index] =
+                            bots[bot_index].alive;
+                    }
+                }
+                bot_pickup_weapons(bots, dropped);
                 update_world_animations(
                     &t_animation, &ct_animation, bots, now
                 );
@@ -2881,43 +5772,111 @@ int bda_main(void)
                 );
                 {
                     int round_finished = 0;
+                    uint32_t hostage_total =
+                        c15_map_hostage_count(&g_map);
+                    uint32_t hostages_rescued =
+                        hostage_count_rescued(hostages);
+                    if (hostage_total > HOSTAGE_MAX) {
+                        hostage_total = HOSTAGE_MAX;
+                    }
                     if (bomb.enabled) {
                         if (bomb.defused) {
                             round_winner = TEAM_CT;
+                            round_reason = ROUND_REASON_BOMB_DEFUSED;
                             round_finished = 1;
                         } else if (bomb.planted &&
                                    time_reached(now, bomb.explode_at)) {
                             round_winner = TEAM_T;
+                            round_reason = ROUND_REASON_TARGET_BOMBED;
                             round_finished = 1;
                             c15_audio_play(
                                 &audio, C15_SOUND_CUE_BOMB_EXPLODE,
                                 C15_SOUND_CHANNEL_PLAYER
                             );
+                            bomb_apply_explosion(
+                                &bomb, bots, hostages, &player,
+                                &player_health, &player_deaths,
+                                corpses, &kill_feed, now
+                            );
+                            add_impact(
+                                impacts, bomb.x, bomb.y,
+                                bomb.z + 12, 2u, now
+                            );
                         } else if (ct_alive == 0u) {
                             round_winner = TEAM_T;
+                            round_reason = ROUND_REASON_ELIMINATION;
                             round_finished = 1;
                         } else if (!bomb.planted && t_alive == 0u) {
                             round_winner = TEAM_CT;
+                            round_reason = ROUND_REASON_ELIMINATION;
                             round_finished = 1;
                         } else if (!bomb.planted &&
                                    round_deadline != 0u &&
                                    time_reached(now, round_deadline)) {
                             round_winner = TEAM_CT;
+                            round_reason = ROUND_REASON_TARGET_SAVED;
                             round_finished = 1;
                         }
+                    } else if (hostage_total != 0u &&
+                               hostages_rescued >= hostage_total) {
+                        round_winner = TEAM_CT;
+                        round_reason = ROUND_REASON_HOSTAGES_RESCUED;
+                        round_finished = 1;
                     } else if (t_alive == 0u || ct_alive == 0u ||
                                (round_deadline != 0u &&
                                 time_reached(now, round_deadline))) {
                         if (t_alive == 0u || ct_alive == 0u) {
                             round_winner =
                                 t_alive != 0u ? TEAM_T : TEAM_CT;
+                            round_reason = ROUND_REASON_ELIMINATION;
+                        } else if (hostage_total != 0u) {
+                            round_winner = TEAM_T;
+                            round_reason = ROUND_REASON_TIME_EXPIRED;
                         } else {
                             round_winner =
                                 t_alive >= ct_alive ? TEAM_T : TEAM_CT;
+                            round_reason = ROUND_REASON_TIME_EXPIRED;
                         }
                         round_finished = 1;
                     }
                     if (round_finished) {
+                        /*
+                         * The bomb explosion is evaluated after the regular
+                         * death-transition pass. Capture any new deaths now
+                         * so their weapons still exist during the end camera.
+                         */
+                        if (player_was_alive && player_health == 0u) {
+                            drop_weapon(
+                                dropped, weapon, weapon_ammo[weapon],
+                                weapon_reserve[weapon],
+                                player.x, player.y, player.z, now
+                            );
+                            player_was_alive = 0u;
+                            spectator_target = next_spectator_target(
+                                bots, player_team, 0xffu
+                            );
+                        }
+                        {
+                            uint32_t bot_index;
+                            for (bot_index = 0u;
+                                 bot_index < BOT_COUNT; ++bot_index) {
+                                if (last_bot_alive[bot_index] &&
+                                    !bots[bot_index].alive) {
+                                    drop_weapon(
+                                        dropped,
+                                        bots[bot_index].weapon,
+                                        bots[bot_index].ammo,
+                                        g_weapon_reserve_max[
+                                            bots[bot_index].weapon
+                                        ] / 2u,
+                                        bots[bot_index].mover.x,
+                                        bots[bot_index].mover.y,
+                                        bots[bot_index].mover.z, now
+                                    );
+                                    last_bot_alive[bot_index] = 0u;
+                                }
+                            }
+                        }
                         if (round_winner == TEAM_T) ++rounds_t;
                         else ++rounds_ct;
                         if (round_winner == player_team) {
@@ -2926,6 +5885,13 @@ int bda_main(void)
                             money += 1400u;
                         }
                         if (money > 16000u) money = 16000u;
+                        c15_audio_play(
+                            &audio,
+                            round_winner == TEAM_T ?
+                                C15_SOUND_CUE_T_WIN :
+                                C15_SOUND_CUE_CT_WIN,
+                            C15_SOUND_CHANNEL_PLAYER
+                        );
                         screen = SCREEN_ROUND_END;
                         round_end_at = now + ROUND_END_MS;
                     }
@@ -2935,11 +5901,64 @@ int bda_main(void)
             }
             if (screen == SCREEN_ROUND_END &&
                 time_reached(now, round_end_at)) {
+                int player_survived = player_health != 0u;
                 ++round;
+                if (!player_survived) {
+                    uint32_t inventory_index;
+                    bda_memset(owned, 0, sizeof(owned));
+                    bda_memset(
+                        weapon_ammo, 0, sizeof(weapon_ammo)
+                    );
+                    bda_memset(
+                        weapon_reserve, 0, sizeof(weapon_reserve)
+                    );
+                    bda_memset(
+                        grenade_counts, 0, sizeof(grenade_counts)
+                    );
+                    owned[WEAPON_KNIFE] = 1u;
+                    weapon = player_team == TEAM_T ?
+                        WEAPON_GLOCK : WEAPON_USP;
+                    owned[weapon] = 1u;
+                    weapon_ammo[weapon] =
+                        g_weapon_capacity[weapon];
+                    weapon_reserve[weapon] =
+                        g_weapon_reserve_max[weapon] / 2u;
+                    player_armor = 0u;
+                    player_helmet = 0u;
+                    player_defuse_kit = 0u;
+                    for (inventory_index = 0u;
+                         inventory_index < WEAPON_COUNT;
+                         ++inventory_index) {
+                        if (!owned[inventory_index]) {
+                            weapon_ammo[inventory_index] = 0u;
+                            weapon_reserve[inventory_index] = 0u;
+                        }
+                    }
+                    change_weapon(
+                        &model_arena, persistent_models,
+                        &weapon, weapon
+                    );
+                }
                 initialize_round(
                     &player, bots, &bomb, player_team,
                     bot_difficulty, map_id, now,
                     &player_health
+                );
+                initialize_hostages(hostages);
+                bda_memset(grenades, 0, sizeof(grenades));
+                bda_memset(corpses, 0, sizeof(corpses));
+                bda_memset(dropped, 0, sizeof(dropped));
+                bda_memset(impacts, 0, sizeof(impacts));
+                bda_memset(&kill_feed, 0, sizeof(kill_feed));
+                g_map.dynamic_open_bits = 0u;
+                g_map.dynamic_broken_bits = 0u;
+                bda_memset(
+                    g_map.dynamic_damage, 0,
+                    sizeof(g_map.dynamic_damage)
+                );
+                bda_memset(
+                    g_map.dynamic_position, 0,
+                    sizeof(g_map.dynamic_position)
                 );
                 t_animation.action = 0xffu;
                 ct_animation.action = 0xffu;
@@ -2947,20 +5966,50 @@ int bda_main(void)
                     &t_animation, &ct_animation, bots, now
                 );
                 c15_player_camera(&player, &camera);
-                weapon_ammo[weapon] = g_weapon_capacity[weapon];
+                camera.focal_length = DEFAULT_FOCAL_LENGTH;
+                freeze_until = now + FREEZE_TIME_MS;
+                round_reason = ROUND_REASON_NONE;
+                spectator_target = 0xffu;
+                player_was_alive = 1u;
+                {
+                    uint32_t bot_index;
+                    for (bot_index = 0u;
+                         bot_index < BOT_COUNT; ++bot_index) {
+                        last_bot_alive[bot_index] =
+                            bots[bot_index].alive;
+                    }
+                }
+                zoomed = 0;
+                burst_remaining = 0u;
+                recoil_q8 = 0u;
+                flash_until = 0u;
                 reloading = 0;
                 start_view_animation(
                     &view_animation, C15_VIEW_ANIMATION_DRAW, now
                 );
                 screen = SCREEN_BUY;
                 selection = weapon;
-                menu_count = WEAPON_COUNT + 1u;
+                menu_count = BUY_ITEM_COUNT;
                 next_logic = now;
+                buy_deadline = now + BUY_TIME_MS;
                 round_deadline = 0u;
             }
         }
 
+        if (game_loaded && player_health == 0u &&
+            (screen == SCREEN_PLAY || screen == SCREEN_ROUND_END)) {
+            if (spectator_target >= BOT_COUNT ||
+                !bots[spectator_target].alive) {
+                spectator_target = next_spectator_target(
+                    bots, player_team, spectator_target
+                );
+            }
+            spectator_camera(&camera, bots, spectator_target);
+        }
+
         if (time_reached(now, next_frame)) {
+            uint32_t render_started;
+            uint32_t render_finished;
             uint32_t frame_end;
             uint32_t frame_elapsed;
             uint32_t instant_fps_x10;
@@ -2969,6 +6018,7 @@ int bda_main(void)
             if (time_reached(now, next_frame)) {
                 next_frame = now + FRAME_INTERVAL_MS;
             }
+            render_started = lite_platform_milliseconds();
             if (screen == SCREEN_MAIN) {
                 draw_main_menu(&framebuffer, selection);
             } else if (screen == SCREEN_OPTIONS) {
@@ -2982,12 +6032,14 @@ int bda_main(void)
                 draw_team_menu(&framebuffer, selection);
             } else if (screen == SCREEN_BUY) {
                 draw_buy_menu(
-                    &framebuffer, money, selection, owned
+                    &framebuffer, money, selection, owned,
+                    player_team, player_armor
                 );
             } else {
                 render_game(
                     &framebuffer, &view, &input, now, &camera, &player,
-                    bots, player_team, player_health, money, round,
+                    bots, player_team, player_health,
+                    spectator_target, money, round,
                     rounds_t, rounds_ct, player_kills, player_deaths,
                     fps_x10, map_id, weapon,
                     time_active(now, fire_until),
@@ -2995,12 +6047,32 @@ int bda_main(void)
                     (now - fire_started) / 54u,
                     view_animation.action == C15_VIEW_ANIMATION_FIRE ?
                         view_animation.frame : 0u,
-                    weapon_ammo[weapon], &bomb, screen, round_winner,
+                    weapon_ammo[weapon], weapon_reserve[weapon],
+                    player_armor, player_defuse_kit, grenade_counts,
+                    hostages, grenades, corpses, dropped,
+                    impacts, &kill_feed,
+                    &bomb, round_deadline, freeze_until,
+                    crosshair_spread_q8,
+                    flash_until, zoomed, silenced, glock_burst,
+                    screen, round_winner, round_reason,
                     &stats, &view_stats, &entity_stats
                 );
             }
+            render_finished = lite_platform_milliseconds();
             (void)lite_platform_present(g_screen);
             frame_end = lite_platform_milliseconds();
+            {
+                uint32_t render_sample =
+                    (render_finished - render_started) * 10u;
+                uint32_t present_sample =
+                    (frame_end - render_finished) * 10u;
+                render_ms_x10 = render_ms_x10 == 0u ?
+                    render_sample :
+                    (render_ms_x10 * 3u + render_sample) / 4u;
+                present_ms_x10 = present_ms_x10 == 0u ?
+                    present_sample :
+                    (present_ms_x10 * 3u + present_sample) / 4u;
+            }
             frame_elapsed = frame_end - fps_last_frame;
             if (frame_elapsed != 0u) {
                 instant_fps_x10 = 10000u / frame_elapsed;
@@ -3014,17 +6086,37 @@ int bda_main(void)
         if (time_reached(now, next_metric)) {
             lite_log_u32("frame", frame);
             lite_log_u32("fps_x10", fps_x10);
+            lite_log_u32("render_ms_x10", render_ms_x10);
+            lite_log_u32("present_ms_x10", present_ms_x10);
             lite_log_u32("screen", (uint32_t)screen);
             lite_log_u32("round", round);
             lite_log_u32("rounds_t", rounds_t);
             lite_log_u32("rounds_ct", rounds_ct);
             lite_log_u32("player_health", player_health);
+            lite_log_u32("player_armor", player_armor);
             lite_log_u32("money", money);
             lite_log_u32("shots_fired", shots_fired);
             lite_log_u32("shots_hit", shots_hit);
+            lite_log_u32(
+                "dropped_weapons", dropped_weapon_count(dropped)
+            );
+            lite_log_u32("spectator_target", spectator_target);
+            lite_log_u32(
+                "freeze_remaining_ms",
+                time_active(now, freeze_until) ?
+                    freeze_until - now : 0u
+            );
             lite_log_u32("bot_shots", bot_shots);
             lite_log_u32("bot_hits", bot_hits);
             lite_log_u32("bot_difficulty", bot_difficulty);
+            lite_log_u32(
+                "hostages_rescued",
+                hostage_count_rescued(hostages)
+            );
+            lite_log_u32("dynamic_open_bits", g_map.dynamic_open_bits);
+            lite_log_u32(
+                "dynamic_broken_bits", g_map.dynamic_broken_bits
+            );
             lite_log_u32("audio_enabled", audio_enabled);
             lite_log_u32("audio_blocks", audio.blocks_written);
             lite_log_u32("audio_short_writes", audio.short_writes);
@@ -3038,8 +6130,13 @@ int bda_main(void)
                 audio.playback_attenuation
             );
             lite_log_u32("world_triangles", stats.drawn_triangles);
+            lite_log_u32("world_pixels", stats.drawn_pixels);
+            lite_log_u32("visible_surfaces", stats.visible_surfaces);
+            lite_log_u32("drawn_surfaces", stats.drawn_surfaces);
             lite_log_u32("entity_triangles", entity_stats.triangles);
+            lite_log_u32("entity_pixels", entity_stats.pixels);
             lite_log_u32("view_triangles", view_stats.triangles);
+            lite_log_u32("view_pixels", view_stats.pixels);
             lite_log_i32("bot0_x", bots[0].mover.x);
             lite_log_i32("bot0_y", bots[0].mover.y);
             lite_log_u32("bot0_nav", bots[0].nav_index);
@@ -3064,6 +6161,10 @@ int bda_main(void)
     lite_log_u32("model_peak_bytes", (uint32_t)model_arena.peak);
     lite_log_u32("shots_fired", shots_fired);
     lite_log_u32("shots_hit", shots_hit);
+    lite_log_u32(
+        "dropped_weapons", dropped_weapon_count(dropped)
+    );
+    lite_log_u32("spectator_target", spectator_target);
     lite_log_u32("bot_shots", bot_shots);
     lite_log_u32("bot_hits", bot_hits);
     lite_log_u32("bot_difficulty", bot_difficulty);
@@ -3080,9 +6181,12 @@ int bda_main(void)
     c15_audio_stop(
         &audio, g_load_scratch, sizeof(g_load_scratch)
     );
-    lite_log_line("CS15 Lite M12 stop");
+    lite_log_line("CS15 Lite M15 classic rounds stop");
     lite_log_close();
     c15_pak_close(&g_pak);
+    if (map_memory) {
+        bda_free(map_memory);
+    }
     lite_platform_close();
     return 0;
 }

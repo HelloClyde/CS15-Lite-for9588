@@ -54,8 +54,12 @@ jobs:
             -DestinationPath 'build/source-assets'
           foreach ($required in @(
             'build/source-assets/cstrike/maps/de_dust2.bsp',
+            'build/source-assets/cstrike/maps/fy_iceworld.bsp',
             'build/source-assets/cstrike/maps/cs_assault.bsp',
             'build/source-assets/cstrike/maps/cs_italy.bsp',
+            'build/source-assets/cstrike/maps/de_inferno.bsp',
+            'build/source-assets/cstrike/maps/de_nuke.bsp',
+            'build/source-assets/cstrike/maps/cs_office.bsp',
             'build/source-assets/cstrike/models/v_ak47.mdl',
             'build/source-assets/cstrike/models/v_awp.mdl',
             'build/source-assets/cstrike/models/v_m249.mdl',

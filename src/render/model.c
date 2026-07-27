@@ -4,10 +4,11 @@
 #include "bda_memory.h"
 #include "platform/bbk9588.h"
 
-/* The largest compiled historical view model is v_m4a1 at 971 vertices. */
-#define MODEL_MAX_PROJECTED_VERTICES 976u
+/* M15 historical maximum: v_elite has 1387 compact vertices. */
+#define MODEL_MAX_PROJECTED_VERTICES 1408u
 #define MODEL_WORLD_NEAR 8
-#define MODEL_WORLD_FOCAL ((int)LITE_VIEW_WIDTH / 2)
+#define MODEL_WORLD_DEFAULT_FOCAL ((int)LITE_VIEW_WIDTH / 2)
+#define MODEL_ENTITY_CULL_RADIUS_Q4 (128 * 16)
 
 typedef struct model_projected_vertex {
     int16_t x;
@@ -24,6 +25,22 @@ typedef struct model_view_vertex {
     int32_t u;
     int32_t v;
 } model_view_vertex_t;
+
+typedef struct model_scan_edge {
+    int32_t x;
+    int32_t dx;
+} model_scan_edge_t;
+
+typedef struct model_scan_gradient {
+    int32_t du_dx;
+    int32_t du_dy;
+    int32_t dv_dx;
+    int32_t dv_dy;
+    int32_t dz_dx;
+    int32_t dz_dy;
+} model_scan_gradient_t;
+
+typedef uint32_t model_depth_alias_u32 __attribute__((__may_alias__));
 
 static model_projected_vertex_t
     g_projected_vertices[MODEL_MAX_PROJECTED_VERTICES];
@@ -67,6 +84,158 @@ static int edge_value(
 {
     return ((int)b->x - a->x) * (y - a->y) -
         ((int)b->y - a->y) * (x - a->x);
+}
+
+static void model_edge_begin(
+    model_scan_edge_t *edge,
+    const model_projected_vertex_t *start,
+    const model_projected_vertex_t *end,
+    int start_y
+)
+{
+    int dy = (int)end->y - start->y;
+    int advance = start_y - start->y;
+    edge->x = (int32_t)((int64_t)start->x * 65536);
+    if (dy != 0) {
+        edge->dx = (int32_t)(
+            ((int64_t)((int)end->x - start->x) * 65536) / dy
+        );
+    } else {
+        edge->dx = 0;
+    }
+    edge->x += edge->dx * advance;
+}
+
+static void model_edge_step(model_scan_edge_t *edge)
+{
+    edge->x += edge->dx;
+}
+
+static inline __attribute__((always_inline)) int model_wrap_coordinate(
+    int value, uint16_t size, uint16_t mask, uint16_t reciprocal
+)
+{
+    uint32_t magnitude;
+    uint32_t quotient;
+    uint32_t result;
+    int negative;
+    if (size <= 1u) {
+        return 0;
+    }
+    if (mask != 0u) {
+        return value & mask;
+    }
+    negative = value < 0;
+    magnitude = negative ? 0u - (uint32_t)value : (uint32_t)value;
+    quotient = (magnitude * reciprocal) >> 16;
+    result = magnitude - quotient * size;
+    while (result >= size) {
+        result -= size;
+    }
+    return negative && result != 0u ? (int)(size - result) : (int)result;
+}
+
+static void draw_model_half(
+    lite_framebuffer_t *fb,
+    uint16_t *depth,
+    const c15_model_texture_t *texture,
+    model_scan_edge_t *first,
+    model_scan_edge_t *second,
+    const model_projected_vertex_t *anchor,
+    const model_scan_gradient_t *gradient,
+    int y_start,
+    int y_end,
+    c15_model_render_stats_t *stats
+)
+{
+    int y;
+    int32_t row_u;
+    int32_t row_v;
+    int32_t row_z;
+    if (y_start < 0) {
+        int skip = -y_start;
+        first->x += first->dx * skip;
+        second->x += second->dx * skip;
+        y_start = 0;
+    }
+    if (y_end > fb->height) {
+        y_end = fb->height;
+    }
+    row_u = (int32_t)(
+        (int64_t)anchor->u * 65536 -
+        (int64_t)gradient->du_dx * anchor->x +
+        (int64_t)gradient->du_dy * (y_start - anchor->y)
+    );
+    row_v = (int32_t)(
+        (int64_t)anchor->v * 65536 -
+        (int64_t)gradient->dv_dx * anchor->x +
+        (int64_t)gradient->dv_dy * (y_start - anchor->y)
+    );
+    row_z = (int32_t)(
+        (int64_t)anchor->z * 65536 -
+        (int64_t)gradient->dz_dx * anchor->x +
+        (int64_t)gradient->dz_dy * (y_start - anchor->y)
+    );
+    for (y = y_start; y < y_end; ++y) {
+        model_scan_edge_t *left = first;
+        model_scan_edge_t *right = second;
+        int x0;
+        int x1;
+        int width;
+        if (left->x > right->x) {
+            left = second;
+            right = first;
+        }
+        x0 = (left->x + 0xffff) >> 16;
+        x1 = right->x >> 16;
+        width = x1 - x0;
+        if (width > 0) {
+            int32_t u = row_u + gradient->du_dx * x0;
+            int32_t v = row_v + gradient->dv_dx * x0;
+            int32_t z = row_z + gradient->dz_dx * x0;
+            int x;
+            uint16_t *frame_row = fb->pixels + y * fb->stride;
+            uint16_t *depth_row = depth + y * LITE_VIEW_WIDTH;
+            if (x0 < 0) {
+                int skip = -x0;
+                u += gradient->du_dx * skip;
+                v += gradient->dv_dx * skip;
+                z += gradient->dz_dx * skip;
+                x0 = 0;
+            }
+            if (x1 >= fb->width) {
+                x1 = fb->width - 1;
+            }
+            for (x = x0; x <= x1; ++x) {
+                uint32_t depth_value = (uint32_t)(z >> 16);
+                if (depth_value > 0u && depth_value < depth_row[x]) {
+                    int tx = model_wrap_coordinate(
+                        u >> 16, texture->width,
+                        texture->width_mask, texture->width_reciprocal
+                    );
+                    int ty = model_wrap_coordinate(
+                        v >> 16, texture->height,
+                        texture->height_mask, texture->height_reciprocal
+                    );
+                    uint8_t texel =
+                        texture->pixels[ty * texture->width + tx];
+                    if ((texture->flags & 1u) == 0u || texel != 255u) {
+                        depth_row[x] = (uint16_t)depth_value;
+                        frame_row[x] = texture->palette[texel];
+                        ++stats->pixels;
+                    }
+                }
+                u += gradient->du_dx;
+                v += gradient->dv_dx;
+                z += gradient->dz_dx;
+            }
+        }
+        model_edge_step(first);
+        model_edge_step(second);
+        row_u += gradient->du_dy;
+        row_v += gradient->dv_dy;
+        row_z += gradient->dz_dy;
+    }
 }
 
 static model_view_vertex_t view_model_vertex(
@@ -165,145 +334,102 @@ static void draw_model_triangle(
 )
 {
     int area = edge_value(a, b, c->x, c->y);
-    int min_x;
-    int max_x;
-    int min_y;
-    int max_y;
+    model_projected_vertex_t first = *a;
+    model_projected_vertex_t second = *b;
+    model_projected_vertex_t third = *c;
+    model_projected_vertex_t temporary;
+    model_scan_edge_t long_edge;
+    model_scan_edge_t short_edge;
+    model_scan_gradient_t gradient;
     int dx1;
     int dy1;
     int dx2;
     int dy2;
-    int32_t du_dx;
-    int32_t du_dy;
-    int32_t dv_dx;
-    int32_t dv_dy;
-    int32_t dz_dx;
-    int32_t dz_dy;
-    int32_t row_u;
-    int32_t row_v;
-    int32_t row_z;
-    int row_bc;
-    int row_ca;
-    int row_ab;
-    int step_x_bc;
-    int step_x_ca;
-    int step_x_ab;
-    int step_y_bc;
-    int step_y_ca;
-    int step_y_ab;
-    int y;
     /* Both GoldSrc camera paths use screen-right = -world/model Y. */
     if (area <= 0) {
         return;
     }
-    min_x = a->x;
-    if (b->x < min_x) min_x = b->x;
-    if (c->x < min_x) min_x = c->x;
-    max_x = a->x;
-    if (b->x > max_x) max_x = b->x;
-    if (c->x > max_x) max_x = c->x;
-    min_y = a->y;
-    if (b->y < min_y) min_y = b->y;
-    if (c->y < min_y) min_y = c->y;
-    max_y = a->y;
-    if (b->y > max_y) max_y = b->y;
-    if (c->y > max_y) max_y = c->y;
-    if (max_x < 0 || max_y < 0 ||
-        min_x >= fb->width || min_y >= fb->height) {
-        return;
-    }
-    if (min_x < 0) min_x = 0;
-    if (min_y < 0) min_y = 0;
-    if (max_x >= fb->width) max_x = fb->width - 1;
-    if (max_y >= fb->height) max_y = fb->height - 1;
     dx1 = (int)b->x - a->x;
     dy1 = (int)b->y - a->y;
     dx2 = (int)c->x - a->x;
     dy2 = (int)c->y - a->y;
-    du_dx = (int32_t)(
+    gradient.du_dx = (int32_t)(
         (((int64_t)((int)b->u - a->u) * dy2 -
           (int64_t)((int)c->u - a->u) * dy1) * 65536) / area
     );
-    du_dy = (int32_t)(
+    gradient.du_dy = (int32_t)(
         (((int64_t)dx1 * ((int)c->u - a->u) -
           (int64_t)dx2 * ((int)b->u - a->u)) * 65536) / area
     );
-    dv_dx = (int32_t)(
+    gradient.dv_dx = (int32_t)(
         (((int64_t)((int)b->v - a->v) * dy2 -
           (int64_t)((int)c->v - a->v) * dy1) * 65536) / area
     );
-    dv_dy = (int32_t)(
+    gradient.dv_dy = (int32_t)(
         (((int64_t)dx1 * ((int)c->v - a->v) -
           (int64_t)dx2 * ((int)b->v - a->v)) * 65536) / area
     );
-    dz_dx = (int32_t)(
+    gradient.dz_dx = (int32_t)(
         (((int64_t)((int)b->z - a->z) * dy2 -
           (int64_t)((int)c->z - a->z) * dy1) * 65536) / area
     );
-    dz_dy = (int32_t)(
+    gradient.dz_dy = (int32_t)(
         (((int64_t)dx1 * ((int)c->z - a->z) -
           (int64_t)dx2 * ((int)b->z - a->z)) * 65536) / area
     );
-    row_u = ((int32_t)a->u << 16) +
-        du_dx * (min_x - a->x) + du_dy * (min_y - a->y);
-    row_v = ((int32_t)a->v << 16) +
-        dv_dx * (min_x - a->x) + dv_dy * (min_y - a->y);
-    row_z = ((int32_t)a->z << 16) +
-        dz_dx * (min_x - a->x) + dz_dy * (min_y - a->y);
-    row_bc = edge_value(b, c, min_x, min_y);
-    row_ca = edge_value(c, a, min_x, min_y);
-    row_ab = edge_value(a, b, min_x, min_y);
-    step_x_bc = -((int)c->y - b->y);
-    step_x_ca = -((int)a->y - c->y);
-    step_x_ab = -((int)b->y - a->y);
-    step_y_bc = (int)c->x - b->x;
-    step_y_ca = (int)a->x - c->x;
-    step_y_ab = (int)b->x - a->x;
-    for (y = min_y; y <= max_y; ++y) {
-        int32_t u = row_u;
-        int32_t v = row_v;
-        int32_t z = row_z;
-        int edge_bc = row_bc;
-        int edge_ca = row_ca;
-        int edge_ab = row_ab;
-        int x;
-        for (x = min_x; x <= max_x; ++x) {
-            if (edge_bc >= 0 && edge_ca >= 0 && edge_ab >= 0) {
-                uint32_t depth_index =
-                    (uint32_t)y * LITE_VIEW_WIDTH + (uint32_t)x;
-                uint32_t depth_value = (uint32_t)(z >> 16);
-                if (depth_value < depth[depth_index]) {
-                    int tx = (u >> 16) % texture->width;
-                    int ty = (v >> 16) % texture->height;
-                    uint8_t texel;
-                    if (tx < 0) tx += texture->width;
-                    if (ty < 0) ty += texture->height;
-                    texel = texture->pixels[
-                        ty * texture->width + tx
-                    ];
-                    if ((texture->flags & 1u) == 0u || texel != 255u) {
-                        depth[depth_index] = (uint16_t)depth_value;
-                        fb->pixels[y * fb->stride + x] =
-                            texture->palette[texel];
-                        ++stats->pixels;
-                    }
-                }
-            }
-            u += du_dx;
-            v += dv_dx;
-            z += dz_dx;
-            edge_bc += step_x_bc;
-            edge_ca += step_x_ca;
-            edge_ab += step_x_ab;
-        }
-        row_u += du_dy;
-        row_v += dv_dy;
-        row_z += dz_dy;
-        row_bc += step_y_bc;
-        row_ca += step_y_ca;
-        row_ab += step_y_ab;
+    if (first.y > second.y) {
+        temporary = first; first = second; second = temporary;
+    }
+    if (second.y > third.y) {
+        temporary = second; second = third; third = temporary;
+    }
+    if (first.y > second.y) {
+        temporary = first; first = second; second = temporary;
+    }
+    if (first.y == third.y || third.y <= 0 || first.y >= fb->height) {
+        return;
+    }
+    if (second.y > first.y) {
+        model_edge_begin(&long_edge, &first, &third, first.y);
+        model_edge_begin(&short_edge, &first, &second, first.y);
+        draw_model_half(
+            fb, depth, texture, &long_edge, &short_edge,
+            a, &gradient,
+            first.y, second.y, stats
+        );
+    }
+    if (third.y > second.y) {
+        model_edge_begin(&long_edge, &first, &third, second.y);
+        model_edge_begin(&short_edge, &second, &third, second.y);
+        draw_model_half(
+            fb, depth, texture, &long_edge, &short_edge,
+            a, &gradient,
+            second.y, third.y, stats
+        );
     }
     ++stats->triangles;
+}
+
+static void clear_model_depth(uint16_t *depth)
+{
+    model_depth_alias_u32 *words = (model_depth_alias_u32 *)depth;
+    uint32_t remaining =
+        (LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT) / 2u;
+    while (remaining >= 8u) {
+        words[0] = 0xffffffffu;
+        words[1] = 0xffffffffu;
+        words[2] = 0xffffffffu;
+        words[3] = 0xffffffffu;
+        words[4] = 0xffffffffu;
+        words[5] = 0xffffffffu;
+        words[6] = 0xffffffffu;
+        words[7] = 0xffffffffu;
+        words += 8;
+        remaining -= 8u;
+    }
+    while (remaining-- != 0u) {
+        *words++ = 0xffffffffu;
+    }
 }
 
 void c15_render_view_model(
@@ -323,10 +449,7 @@ void c15_render_view_model(
         return;
     }
     bda_memset(stats, 0, sizeof(*stats));
-    for (index = 0u;
-         index < LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT; ++index) {
-        depth[index] = 0xffffu;
-    }
+    clear_model_depth(depth);
     for (index = 0u; index < model->vertex_count; ++index) {
         const uint8_t *source = model->vertices + index * 8u;
         model_projected_vertex_t *target = &g_projected_vertices[index];
@@ -422,6 +545,7 @@ void c15_render_world_model(
     int32_t camera_cosine;
     int32_t pitch_sine;
     int32_t pitch_cosine;
+    int32_t focal;
     uint32_t index;
     if (!model || !model->loaded || !framebuffer || !depth || !camera ||
         !stats || model->vertex_count > MODEL_MAX_PROJECTED_VERTICES) {
@@ -437,6 +561,31 @@ void c15_render_world_model(
     pitch_cosine = model_cos_q14_q8(
         (uint16_t)(int16_t)camera->pitch_q8
     );
+    focal = camera->focal_length != 0u ?
+        camera->focal_length : MODEL_WORLD_DEFAULT_FOCAL;
+    {
+        int32_t origin_dx_q4 = (origin_x - camera->x) * 16;
+        int32_t origin_dy_q4 = (origin_y - camera->y) * 16;
+        int32_t origin_side_q4 = (int32_t)(
+            ((int64_t)camera_sine * origin_dx_q4 -
+             (int64_t)camera_cosine * origin_dy_q4) >> 14
+        );
+        int32_t origin_forward_q4 = (int32_t)(
+            ((int64_t)camera_cosine * origin_dx_q4 +
+             (int64_t)camera_sine * origin_dy_q4) >> 14
+        );
+        if (origin_forward_q4 < -MODEL_ENTITY_CULL_RADIUS_Q4 ||
+            (int64_t)origin_side_q4 * focal >
+                (int64_t)origin_forward_q4 *
+                    ((int32_t)LITE_VIEW_WIDTH / 2) +
+                (int64_t)MODEL_ENTITY_CULL_RADIUS_Q4 * focal ||
+            (int64_t)origin_side_q4 * focal <
+                -(int64_t)origin_forward_q4 *
+                    ((int32_t)LITE_VIEW_WIDTH / 2) -
+                (int64_t)MODEL_ENTITY_CULL_RADIUS_Q4 * focal) {
+            return;
+        }
+    }
     for (index = 0u; index < model->vertex_count; ++index) {
         const uint8_t *source = model->vertices + index * 8u;
         model_projected_vertex_t *target = &g_projected_vertices[index];
@@ -479,10 +628,10 @@ void c15_render_world_model(
         } else {
             int32_t projected_x =
                 (int32_t)LITE_VIEW_WIDTH / 2 +
-                (side_q4 * MODEL_WORLD_FOCAL) / view_z_q4;
+                (side_q4 * focal) / view_z_q4;
             int32_t projected_y =
                 (int32_t)LITE_VIEW_HEIGHT / 2 -
-                (view_y_q4 * MODEL_WORLD_FOCAL) / view_z_q4;
+                (view_y_q4 * focal) / view_z_q4;
             int32_t depth_value = view_z_q4 >> 4;
             if (projected_x < -32768) projected_x = -32768;
             if (projected_x > 32767) projected_x = 32767;
