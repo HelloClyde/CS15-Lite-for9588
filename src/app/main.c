@@ -20,11 +20,11 @@
 #define MENU_TEXTURE_ARENA_BYTES 160000u
 #define MAP_WORKING_SET_LIMIT_BYTES (2u * 1024u * 1024u)
 /*
- * Player skins are prefiltered to 16x16 offline. This leaves both team
- * meshes, both held weapons and the largest animated view model below 64 KiB
+ * The two shared team skins retain a 64-pixel authored mip. A 96 KiB arena
+ * leaves room for them, both held weapons and the largest animated view model
  * without runtime texture conversion or per-frame model streaming.
  */
-#define MODEL_ARENA_BYTES (64u * 1024u)
+#define MODEL_ARENA_BYTES (96u * 1024u)
 #define LOAD_SCRATCH_BYTES 2048u
 #define FRAME_INTERVAL_MS 40u
 #define LOGIC_INTERVAL_MS 40u
@@ -681,7 +681,7 @@ static int resource_pack_is_current(uint32_t map_id)
     };
     uint32_t index;
     int complete = resource_pack_has(
-        "meta/m17", C15_FOURCC('V','E','R','0')
+        "meta/m19", C15_FOURCC('V','E','R','0')
     );
     if (!resource_pack_has(
             "sound/game", C15_FOURCC('S','N','D','0'))) {
@@ -4942,7 +4942,7 @@ int bda_main(void)
     bda_memset(grenade_counts, 0, sizeof(grenade_counts));
     camera.focal_length = DEFAULT_FOCAL_LENGTH;
     lite_log_reset();
-    lite_log_line("CS15 Lite M17 original world textures start");
+    lite_log_line("CS15 Lite M19 classic world/player textures start");
     lite_log_line(
         "game_flow=freeze-buy-drops-spectator-objectives-scoreboard"
     );
@@ -6277,7 +6277,7 @@ int bda_main(void)
     c15_audio_stop(
         &audio, g_load_scratch, sizeof(g_load_scratch)
     );
-    lite_log_line("CS15 Lite M17 original world textures stop");
+    lite_log_line("CS15 Lite M19 classic world/player textures stop");
     lite_log_close();
     c15_pak_close(&g_pak);
     if (map_memory) {

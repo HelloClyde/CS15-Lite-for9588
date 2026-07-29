@@ -37,7 +37,7 @@ class AssetFormatTests(unittest.TestCase):
         self.assertEqual(result["entries"][0]["name"], "tex/test")
         self.assertEqual(len(pack) % 1, 0)
 
-    def test_world_texture_defaults_to_original_mip_and_palette(self):
+    def test_world_texture_profiles_preserve_the_classic_palette(self):
         width = 64
         height = 32
         mip_sizes = [
@@ -84,6 +84,23 @@ class AssetFormatTests(unittest.TestCase):
             compact_validated["resident_bytes"], 64 * 2 + 32 * 16
         )
 
+        classic_chunk, classic_detail = assetc.compile_texture(
+            texture, maximum_dimension=64, palette_colors=256
+        )
+        classic_validated = assetc.validate_texture_chunk(classic_chunk)
+        self.assertEqual(classic_detail["selected_mip"], 0)
+        self.assertEqual(classic_validated["palette_colors"], 256)
+
+    def test_uv_period_base_matches_v013_until_centering_is_required(self):
+        self.assertEqual(
+            assetc.texture_period_base([64.0, 80.0, 96.0], 64),
+            64.0,
+        )
+        self.assertEqual(
+            assetc.texture_period_base([-16.0, 2048.0], 64),
+            1024.0,
+        )
+
     def test_corrupt_pack_crc_is_rejected(self):
         texture = assetc.TEX_HEADER.pack(
             b"CTX1", 1, 1, 0, 256, 1, 1, 1, 0, bytes(3)
@@ -111,6 +128,29 @@ class AssetFormatTests(unittest.TestCase):
         )
         self.assertEqual((detail["width"], detail["height"]), (16, 8))
         self.assertEqual(detail["resident_bytes"], 512 + 16 * 8)
+
+        classic_chunk, classic_detail, classic_level = (
+            assetc.compile_studio_texture(
+                "player.bmp",
+                0,
+                width,
+                height,
+                bytes(width * height),
+                bytes(256 * 3),
+                maximum_dimension=assetc.CLASSIC_PLAYER_TEXTURE_DIMENSION,
+            )
+        )
+        self.assertEqual(classic_level, 1)
+        self.assertEqual(
+            (classic_detail["width"], classic_detail["height"]), (64, 32)
+        )
+        self.assertEqual(
+            classic_detail["resident_bytes"], 512 + 64 * 32
+        )
+        self.assertEqual(
+            assetc.validate_texture_chunk(classic_chunk)["palette_colors"],
+            256,
+        )
         self.assertEqual(level, 3)
         self.assertEqual(
             assetc.validate_texture_chunk(chunk)["resident_bytes"],
@@ -259,6 +299,15 @@ class AssetFormatTests(unittest.TestCase):
         )
         self.assertEqual(matrices[0][3::4], (10, 20, 30))
         self.assertEqual(matrices[1][3::4], (14, 20, 30))
+
+    def test_studio_vertex_key_keeps_coincident_bone_seams_distinct(self):
+        position = (12.25, -4.5, 31.0)
+        first = assetc.studio_vertex_key(position, 17, 29, 7)
+        duplicate = assetc.studio_vertex_key(position, 17, 29, 7)
+        other_bone = assetc.studio_vertex_key(position, 17, 29, 8)
+        self.assertEqual(first, duplicate)
+        self.assertNotEqual(first, other_bone)
+        self.assertEqual(first[:5], other_bone[:5])
 
     def test_hybrid_gait_keeps_upper_body_on_moving_pelvis(self):
         names = ["Bip01", "Bip01 Pelvis", "Bip01 Spine", "Bip01 L Thigh"]

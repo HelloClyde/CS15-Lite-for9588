@@ -55,7 +55,11 @@ HOSTAGE = struct.Struct("<3h")
 ZONE = struct.Struct("<6hBB")
 DYNAMIC_ENTITY = struct.Struct("<BBH6hII")
 
+CLASSIC_WORLD_TEXTURE_PROFILE = (64, 256)
 COMPRESSED_WORLD_TEXTURE_PROFILE = (32, 64)
+FULL_WORLD_TEXTURE_PROFILE = (None, 256)
+CLASSIC_PLAYER_TEXTURE_DIMENSION = 64
+COMPRESSED_PLAYER_TEXTURE_DIMENSION = 16
 
 SOUND_CUE_SOURCES = (
     "weapons/knife_slash1.wav",
@@ -500,6 +504,23 @@ def transform_studio_vertex(
         + matrix[row * 4 + 3]
         for row in range(3)
     )  # type: ignore[return-value]
+
+
+def studio_vertex_key(
+    position: tuple[float, float, float],
+    u: int,
+    v: int,
+    bone: int,
+) -> tuple[int, int, int, int, int, int]:
+    """Keep coincident UV seams separate when their animation bones differ."""
+    return (
+        checked_i16(position[0] * 16.0, "model vertex x"),
+        checked_i16(position[1] * 16.0, "model vertex y"),
+        checked_i16(position[2] * 16.0, "model vertex z"),
+        u,
+        v,
+        bone,
+    )
 
 
 def studio_animation_frame_delta(
@@ -1526,7 +1547,7 @@ def compile_studio_model(
     )
     vertices = bytearray()
     triangles = bytearray()
-    unique_vertices: dict[tuple[int, int, int, int, int], int] = {}
+    unique_vertices: dict[tuple[int, int, int, int, int, int], int] = {}
     quantized_positions: list[tuple[int, int, int]] = []
     animation_sources: list[
         tuple[int, tuple[float, float, float]]
@@ -1540,10 +1561,7 @@ def compile_studio_model(
         bone: int,
         source: tuple[float, float, float],
     ) -> int:
-        qx = checked_i16(position[0] * 16.0, "model vertex x")
-        qy = checked_i16(position[1] * 16.0, "model vertex y")
-        qz = checked_i16(position[2] * 16.0, "model vertex z")
-        key = (qx, qy, qz, u, v)
+        key = studio_vertex_key(position, u, v, bone)
         existing = unique_vertices.get(key)
         if existing is not None:
             return existing
@@ -1551,6 +1569,7 @@ def compile_studio_model(
         if result >= 65535:
             raise AssetError(f"{path.name} has too many compiled vertices")
         unique_vertices[key] = result
+        qx, qy, qz = key[:3]
         vertices.extend(MDL_VERTEX.pack(qx, qy, qz, u, v))
         quantized_positions.append((qx, qy, qz))
         animation_sources.append((bone, source))
@@ -1808,10 +1827,20 @@ def light_for_face(
     for index in range(0, len(samples), 3):
         total += (samples[index] * 77 + samples[index + 1] * 150 +
                   samples[index + 2] * 29) >> 8
-    # The 9588 LCD loses the lowest GoldSrc lightmap levels; keeping a modest
-    # offline floor makes Nuke/Office corridors readable without runtime
-    # gamma tables or full-precision lightmaps.
-    return max(48, min(255, total // sample_count))
+    return max(24, min(255, total // sample_count))
+
+
+def texture_period_base(values: list[float], period: int) -> float:
+    """Prefer the v0.1.3 UV origin, centering only to avoid Q12.4 overflow."""
+    minimum = min(values)
+    maximum = max(values)
+    base = math.floor(minimum / period) * period
+    if (
+        (minimum - base) * 16.0 >= -32768.0
+        and (maximum - base) * 16.0 <= 32767.0
+    ):
+        return float(base)
+    return float(round(((minimum + maximum) * 0.5) / period) * period)
 
 
 def parse_entities(entity_blob: bytes) -> list[dict[str, str]]:
@@ -2116,15 +2145,12 @@ def compile_bsp(
         # without changing repeated sampling.
         tw = max(1, textures[texture_id].width >> selected_mip)
         th = max(1, textures[texture_id].height >> selected_mip)
-        minimum_u = min(item[0] for item in face_uv)
-        maximum_u = max(item[0] for item in face_uv)
-        minimum_v = min(item[1] for item in face_uv)
-        maximum_v = max(item[1] for item in face_uv)
-        # Center the face's range before choosing a texture-period offset.
-        # Basing the shift only on the minimum can turn an exactly representable
-        # 2048.0 edge into +32768 in Q12.4 (de_inferno face 3910).
-        base_u = round(((minimum_u + maximum_u) * 0.5) / tw) * tw
-        base_v = round(((minimum_v + maximum_v) * 0.5) / th) * th
+        base_u = texture_period_base(
+            [item[0] for item in face_uv], tw
+        )
+        base_v = texture_period_base(
+            [item[1] for item in face_uv], th
+        )
         for position, uv in zip(face_positions, face_uv):
             vertices_out += SURFACE_VERTEX.pack(
                 checked_i16(position[0], f"face {face_index} x"),
@@ -2869,8 +2895,15 @@ def build_command(args: argparse.Namespace) -> None:
             maximum_dimension, palette_colors = (
                 COMPRESSED_WORLD_TEXTURE_PROFILE
             )
+            texture_profile_name = "low-memory"
+        elif args.full_world_textures:
+            maximum_dimension, palette_colors = FULL_WORLD_TEXTURE_PROFILE
+            texture_profile_name = "full"
         else:
-            maximum_dimension, palette_colors = None, 256
+            maximum_dimension, palette_colors = (
+                CLASSIC_WORLD_TEXTURE_PROFILE
+            )
+            texture_profile_name = "classic"
         runtime_references: list[MipTexture] = []
         selected_mips: list[int] = []
         map_texture_assets: list[str] = []
@@ -2942,6 +2975,7 @@ def build_command(args: argparse.Namespace) -> None:
         )
         bsp_detail["name"] = map_name
         bsp_detail["texture_profile"] = {
+            "name": texture_profile_name,
             "compressed": bool(args.compress_world_textures),
             "maximum_dimension": maximum_dimension,
             "palette_colors": palette_colors,
@@ -3021,6 +3055,14 @@ def build_command(args: argparse.Namespace) -> None:
         assets.extend(model_textures)
         model_manifest.append(detail)
     world_model_manifest: list[dict[str, object]] = []
+    player_texture_dimension = (
+        COMPRESSED_PLAYER_TEXTURE_DIMENSION
+        if args.compress_player_textures
+        else CLASSIC_PLAYER_TEXTURE_DIMENSION
+    )
+    player_texture_profile_name = (
+        "low-memory" if args.compress_player_textures else "classic"
+    )
     for specification in args.model or []:
         if "=" not in specification:
             raise AssetError(
@@ -3056,11 +3098,18 @@ def build_command(args: argparse.Namespace) -> None:
             model_path, asset_base,
             with_locomotion_animation=True,
             maximum_texture_dimension=(
-                16 if asset_name.startswith("player_") else 64
+                player_texture_dimension
+                if asset_name.startswith("player_") else 64
             ),
             pose_sequence_name=player_pose,
             bone_merge_path=merge_path,
         )
+        if asset_name.startswith("player_"):
+            detail["texture_profile"] = {
+                "name": player_texture_profile_name,
+                "maximum_dimension": player_texture_dimension,
+                "palette_colors": 256,
+            }
         assets.append(PakAsset(b"MDL0", asset_base, model_chunk))
         if locomotion is None:
             raise AssetError(
@@ -3088,8 +3137,8 @@ def build_command(args: argparse.Namespace) -> None:
         assets.append(PakAsset(b"SND0", "sound/game", sound_chunk))
         sound_manifest.append(sound_detail)
     assets.append(PakAsset(
-        b"VER0", "meta/m17",
-        b"CS15LITE-M17-OPTIONAL-WORLD-TEXTURE-COMPRESSION\0"
+        b"VER0", "meta/m19",
+        b"CS15LITE-M19-CLASSIC-WORLD-AND-PLAYER-TEXTURES\0"
     ))
     pack = build_pack(assets)
     validation = validate_pack(pack)
@@ -3099,10 +3148,11 @@ def build_command(args: argparse.Namespace) -> None:
     manifest = {
         "format": "CS15 Lite asset manifest",
         "format_version": 1,
-        "runtime_resource_revision": "M17",
-        "world_texture_compression": bool(
-            args.compress_world_textures
-        ),
+        "runtime_resource_revision": "M19",
+        "world_texture_profile": texture_profile_name,
+        "world_texture_compression": bool(args.compress_world_textures),
+        "player_texture_profile": player_texture_profile_name,
+        "player_texture_compression": bool(args.compress_player_textures),
         "map": map_manifest[0],
         "maps": map_manifest,
         "textures": texture_manifest,
@@ -3215,12 +3265,25 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="compile historical combat/objective cues into sound/game",
     )
-    build.add_argument(
+    world_texture_group = build.add_mutually_exclusive_group()
+    world_texture_group.add_argument(
         "--compress-world-textures",
         action="store_true",
         help="opt into the v0.3.1 low-memory world texture profile "
              "(maximum 32-pixel mip and 64-colour palette); disabled by "
-             "default so original mip 0 and all 256 colours are retained",
+             "default",
+    )
+    world_texture_group.add_argument(
+        "--full-world-textures",
+        action="store_true",
+        help="opt into source mip 0 world textures; the default matches "
+             "v0.1.3 with a maximum 64-pixel authored mip and 256 colours",
+    )
+    build.add_argument(
+        "--compress-player-textures",
+        action="store_true",
+        help="opt into 16-pixel player skins; the default retains a "
+             "maximum 64-pixel authored mip and all 256 colours",
     )
     build.add_argument(
         "--allow-missing",

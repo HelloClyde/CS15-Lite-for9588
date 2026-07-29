@@ -92,6 +92,54 @@ jobs:
             -Cstrike 'build/source-assets/cstrike' `
             -Valve 'build/source-assets/valve'
 
+      - name: Verify classic world and player texture profiles
+        shell: pwsh
+        run: |
+          $manifest = Get-Content `
+            'build/assets/CS15.manifest.json' -Raw | ConvertFrom-Json
+          if ($manifest.runtime_resource_revision -ne 'M19' -or
+              $manifest.world_texture_profile -ne 'classic' -or
+              $manifest.world_texture_compression -or
+              $manifest.player_texture_profile -ne 'classic' -or
+              $manifest.player_texture_compression) {
+            throw 'Release pack did not use the M19 classic texture profiles'
+          }
+          $iceworld = $manifest.maps |
+            Where-Object name -eq 'fy_iceworld'
+          if (-not $iceworld -or
+              $iceworld.texture_profile.maximum_dimension -ne 64 -or
+              $iceworld.texture_profile.palette_colors -ne 256 -or
+              $iceworld.resident_texture_bytes -ne 15360) {
+            throw 'Iceworld texture profile regressed from v0.1.3'
+          }
+          $players = @(
+            $manifest.world_models |
+              Where-Object name -match '^mdl/player_'
+          )
+          if ($players.Count -ne 2) {
+            throw 'Expected both historical team player models'
+          }
+          $expectedTriangles = @{
+            'mdl/player_terror' = 740
+            'mdl/player_urban' = 790
+          }
+          foreach ($player in $players) {
+            if ($player.texture_profile.maximum_dimension -ne 64 -or
+                $player.texture_profile.palette_colors -ne 256 -or
+                $player.textures[0].width -ne 64 -or
+                $player.textures[0].height -ne 64 -or
+                $player.triangles -ne $expectedTriangles[$player.name]) {
+              throw "Player model quality regressed: $($player.name)"
+            }
+          }
+          $maximumViewVertices = (
+            $manifest.view_models |
+              Measure-Object vertices -Maximum
+          ).Maximum
+          if ($maximumViewVertices -gt 1408) {
+            throw "View model exceeds runtime vertex capacity: $maximumViewVertices"
+          }
+
       - name: Build BDA
         shell: pwsh
         run: .\tools\build.ps1 -Clean
@@ -121,9 +169,10 @@ jobs:
 
           This workflow downloads the authorized original cstrike archive
           from $($env:CS15_SOURCE_RELEASE), verifies its SHA-256, preprocesses
-          maps/models/textures/animation/audio, rejects missing WAD textures,
-          and publishes the matching CS15.C15PAK with the BDA and
-          ready-to-copy 9588 install ZIP.
+          maps/models/textures/animation/audio, verifies the M19 v0.1.3-style
+          64-pixel/256-colour world texture profile and 64-pixel historical
+          player skins, rejects missing WAD textures, and publishes the
+          matching CS15.C15PAK with the BDA and ready-to-copy 9588 install ZIP.
 
           Do not make the repository or these release assets public.
           "@

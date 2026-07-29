@@ -9,7 +9,7 @@
 #define NEAR_PLANE 8
 #define DEFAULT_FOCAL_LENGTH ((int)LITE_VIEW_WIDTH / 2)
 #define SURF_PLANEBACK 0x8000u
-/* M17 peak visible set: cs_office; keep room for all converted surfaces. */
+/* M19 peak visible set: cs_office; keep room for all converted surfaces. */
 #define MAX_CACHED_VISIBLE_SURFACES 1536u
 
 typedef struct view_vertex {

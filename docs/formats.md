@@ -147,12 +147,14 @@ uint16   palette[]       preconverted RGB565
 uint8    pixels[]
 ```
 
-World textures keep the authored GoldSrc mip level 0 and all 256 RGB565
-palette entries by default. `--compress-world-textures` is an explicit
-low-memory option that selects an authored mip no larger than 32 pixels and
-quantizes it to 64 colours. Model texture limits remain selected per asset
-(16 for player skins, 32 for view models, at most 64 for held models) and
-retain 256 colors. Runtime memory is therefore
+World textures default to the v0.1.3 profile: an authored mip no larger than
+64 pixels with all 256 RGB565 palette entries. `--compress-world-textures` is
+an explicit low-memory option that selects an authored mip no larger than
+32 pixels and quantizes it to 64 colours. `--full-world-textures` retains
+source mip level 0 for renderer experiments. Player skins default to a
+64-pixel authored mip and 256 colors; `--compress-player-textures` explicitly
+selects the old 16-pixel low-memory profile. View models use at most 32 pixels
+and held models at most 64. Runtime memory is therefore
 `width*height + palette_count*2`, with no RGBA expansion or runtime
 resampling. Large maps prefetch front-facing `TEX0` entries referenced by the
 current PVS into a bounded cache and page an actually drawn material on
@@ -202,7 +204,9 @@ uint8    flags
 The final table contains one `uint32` C15PAK asset ID for each model texture.
 Those textures use the same indexed `C15TEX` representation and 64-pixel
 maximum dimension as world textures. A model's complete resident cost is its
-`C15MDL` chunk plus only these referenced texture chunks.
+`C15MDL` chunk plus only these referenced texture chunks. Vertices with the
+same base-pose position and UV remain distinct when they belong to different
+bones, preventing animated elbow/wrist seams from being welded together.
 
 ## `C15ANM` version 1
 
@@ -272,7 +276,7 @@ uint8    pixels[]        two 4-bit indices per byte, low nibble first
 ```
 
 There is one weapon-specific `MSP0` entry for every firearm in the 23-item
-M17 weapon table (Knife has no muzzle flash). Although weapons share the
+M19 weapon table (Knife has no muzzle flash). Although weapons share the
 historical sprite art, their baked StudioMDL attachment tracks differ. At
 runtime the current attachment is projected with the same view-model
 placement, recoil and bob as the weapon.

@@ -4,7 +4,7 @@
 #include "bda_memory.h"
 #include "platform/bbk9588.h"
 
-/* M15 historical maximum: v_elite has 1387 compact vertices. */
+/* M19 historical maximum: v_elite has 1402 bone-safe compact vertices. */
 #define MODEL_MAX_PROJECTED_VERTICES 1408u
 #define MODEL_WORLD_NEAR 8
 #define MODEL_WORLD_DEFAULT_FOCAL ((int)LITE_VIEW_WIDTH / 2)

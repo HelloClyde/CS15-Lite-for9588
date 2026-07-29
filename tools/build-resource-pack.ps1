@@ -11,6 +11,10 @@ param(
 
     [switch]$CompressWorldTextures,
 
+    [switch]$FullWorldTextures,
+
+    [switch]$CompressPlayerTextures,
+
     [switch]$AllowMissing
 )
 
@@ -119,6 +123,12 @@ if ($AllowMissing) {
 }
 if ($CompressWorldTextures) {
     $arguments += '--compress-world-textures'
+}
+if ($FullWorldTextures) {
+    $arguments += '--full-world-textures'
+}
+if ($CompressPlayerTextures) {
+    $arguments += '--compress-player-textures'
 }
 
 & $python @arguments
