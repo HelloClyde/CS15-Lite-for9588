@@ -30,7 +30,11 @@ int c15_pak_read(
 )
 {
     (void)pak;
-    (void)entry;
+    if (relative_offset == 24u && size == 128u &&
+        (entry->offset == 1000u || entry->offset == 2000u)) {
+        memset(destination, (int)(entry->offset / 1000u), size);
+        return 1;
+    }
     if (relative_offset != expected_visibility_offset ||
         size != streamed_visibility_size) {
         return 0;
@@ -62,10 +66,30 @@ uint32_t c15_crc32(const void *data, uint32_t size)
 
 void *lite_arena_alloc(lite_arena_t *arena, size_t size, size_t alignment)
 {
-    (void)arena;
-    (void)size;
-    (void)alignment;
-    return 0;
+    size_t aligned;
+    if (!arena || !arena->base || alignment == 0u) {
+        return 0;
+    }
+    aligned = (arena->used + alignment - 1u) & ~(alignment - 1u);
+    if (aligned > arena->capacity ||
+        size > arena->capacity - aligned) {
+        ++arena->failures;
+        return 0;
+    }
+    arena->used = aligned + size;
+    if (arena->used > arena->peak) {
+        arena->peak = arena->used;
+    }
+    ++arena->allocations;
+    return arena->base + aligned;
+}
+
+void lite_arena_reset(lite_arena_t *arena)
+{
+    if (arena) {
+        arena->used = 0u;
+        arena->allocations = 0u;
+    }
 }
 
 static void put_i16(uint8_t *target, int16_t value)
@@ -90,6 +114,8 @@ int main(void)
     uint8_t model_data[48] = {0};
     uint8_t mark_data[2] = {0};
     uint8_t surface_data[16] = {0};
+    uint8_t stream_surface_data[32] = {0};
+    uint8_t texture_storage[160] = {0};
     uint8_t dynamic_data[48] = {0};
     uint8_t ladder_data[14] = {0};
     uint8_t rescue_data[14] = {0};
@@ -107,6 +133,7 @@ int main(void)
     c15_pak_t pak = {0};
     c15_pak_entry_t entry = {0};
     c15_camera_t camera = {0};
+    lite_arena_t texture_arena = {0};
     uint32_t visible_leaves = 0u;
     c15_map_t map;
 
@@ -221,9 +248,72 @@ int main(void)
     assert(visible_leaves == 1u);
 
     /*
+     * A bounded cache must discard an older PVS texture when the next
+     * visible set cannot fit beside it, then load the new set cleanly.
+     */
+    memset(&map, 0, sizeof(map));
+    put_i16(stream_surface_data + 6, 0);
+    put_i16(stream_surface_data + 16 + 6, 1);
+    surfaces.data = stream_surface_data;
+    surfaces.count = 2u;
+    surfaces.stride = 16u;
+    texture_arena.base = texture_storage;
+    texture_arena.capacity = sizeof(texture_storage);
+    map.pak = &pak;
+    map.surface_section = &surfaces;
+    map.texture_arena = &texture_arena;
+    map.texture_count = 2u;
+    map.stream_textures = 1u;
+    map.loaded = 1;
+    map.textures[0].entry_offset = 1000u;
+    map.textures[0].entry_size = 152u;
+    map.textures[0].resident_bytes = 128u;
+    map.textures[0].palette_count = 64u;
+    map.textures[1].entry_offset = 2000u;
+    map.textures[1].entry_size = 152u;
+    map.textures[1].resident_bytes = 128u;
+    map.textures[1].palette_count = 64u;
+    surface_bits[0] = 1u;
+    assert(c15_map_prepare_visible_textures(
+        &map, surface_bits, sizeof(surface_bits)
+    ));
+    assert(map.textures[0].loaded);
+    assert(!map.textures[1].loaded);
+    surface_bits[0] = 2u;
+    assert(c15_map_prepare_visible_textures(
+        &map, surface_bits, sizeof(surface_bits)
+    ));
+    assert(!map.textures[0].loaded);
+    assert(map.textures[1].loaded);
+    assert(map.texture_cache_reloads == 1u);
+    surface_bits[0] = 3u;
+    assert(c15_map_prepare_visible_textures(
+        &map, surface_bits, sizeof(surface_bits)
+    ));
+    assert(map.textures[0].loaded);
+    assert(!map.textures[1].loaded);
+    assert(c15_map_ensure_texture(&map, 1u));
+    assert(!map.textures[0].loaded);
+    assert(map.textures[1].loaded);
+    assert(map.texture_cache_reloads == 3u);
+
+    /*
      * cs_italy carries 2131 visibility leaves. This compressed all-hidden
      * row verifies maps beyond the old 2048-leaf stack-buffer limit.
      */
+    memset(&map, 0, sizeof(map));
+    surfaces.data = surface_data;
+    surfaces.count = 1u;
+    surfaces.stride = 16u;
+    map.plane_section = &planes;
+    map.node_section = &nodes;
+    map.leaf_section = &leaves;
+    map.model_section = &models;
+    map.mark_section = &marks;
+    map.surface_section = &surfaces;
+    map.visibility_section = &visibility;
+    map.pak = &pak;
+    map.entry = entry;
     put_i32(model_data + 36, 2131);
     leaves.count = 2132u;
     streamed_visibility[0] = 0u;

@@ -24,6 +24,9 @@ typedef struct c15_map_section {
 } c15_map_section_t;
 
 typedef struct c15_texture {
+    uint32_t entry_offset;
+    uint32_t entry_size;
+    uint32_t resident_bytes;
     uint16_t width;
     uint16_t height;
     uint16_t flags;
@@ -36,6 +39,7 @@ typedef struct c15_texture {
     uint16_t height_reciprocal;
     char name[17];
     uint8_t special;
+    uint8_t loaded;
 } c15_texture_t;
 
 typedef struct c15_camera {
@@ -99,6 +103,7 @@ typedef struct c15_plane {
 
 typedef struct c15_map {
     const c15_pak_t *pak;
+    lite_arena_t *texture_arena;
     c15_pak_entry_t entry;
     c15_map_section_t sections[C15_MAP_MAX_SECTIONS];
     uint32_t section_count;
@@ -121,10 +126,14 @@ typedef struct c15_map {
     uint32_t texture_count;
     c15_camera_t spawn;
     uint32_t source_crc32;
+    uint32_t texture_resident_bytes;
+    uint32_t texture_cache_bytes;
+    uint32_t texture_cache_reloads;
     uint32_t dynamic_open_bits;
     uint32_t dynamic_broken_bits;
     uint8_t dynamic_damage[C15_MAP_MAX_DYNAMIC_ENTITIES];
     uint8_t dynamic_position[C15_MAP_MAX_DYNAMIC_ENTITIES];
+    uint8_t stream_textures;
     uint8_t load_error;
     int loaded;
 } c15_map_t;
@@ -135,9 +144,16 @@ int c15_map_load(
     const char *map_name,
     lite_arena_t *map_arena,
     lite_arena_t *texture_arena,
+    int stream_textures,
     void *scratch,
     uint32_t scratch_size
 );
+int c15_map_prepare_visible_textures(
+    c15_map_t *map,
+    const uint8_t *surface_bits,
+    uint32_t surface_bits_size
+);
+int c15_map_ensure_texture(c15_map_t *map, uint32_t texture_index);
 const c15_map_section_t *c15_map_section(
     const c15_map_t *map, uint32_t type
 );

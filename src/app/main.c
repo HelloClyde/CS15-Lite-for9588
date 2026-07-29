@@ -16,11 +16,9 @@
 
 #define ASSET_PATH \
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\CS15LITE\\CS15.C15PAK"
-/*
- * The 320x240 RGB565 historical menu splash is the worst resident case at
- * 153600 bytes. Office peaks just below 155 KB after offline reduction.
- */
-#define TEXTURE_ARENA_BYTES 160000u
+/* The historical 320x240 RGB565 menu splash occupies 153600 bytes. */
+#define MENU_TEXTURE_ARENA_BYTES 160000u
+#define MAP_WORKING_SET_LIMIT_BYTES (2u * 1024u * 1024u)
 /*
  * Player skins are prefiltered to 16x16 offline. This leaves both team
  * meshes, both held weapons and the largest animated view model below 64 KiB
@@ -330,6 +328,26 @@ static const uint32_t g_map_arena_bytes[MAP_COUNT] = {
 };
 
 /*
+ * Runtime texture storage is allocated only after a map is selected.
+ * Dust2 and Iceworld fit their original textures eagerly. Larger maps use
+ * front-facing PVS prefetch plus demand paging. Geometry + the bounded cache
+ * stay below a 2 MiB working-set ceiling even with texture compression off.
+ */
+static const uint32_t g_texture_arena_bytes[MAP_COUNT] = {
+    1100000u, 155648u, 1300000u, 1200000u,
+    1280000u, 1240000u, 1000000u
+};
+
+/*
+ * Large maps retain prefetched materials until the cache fills, then page in
+ * only textures that reach the rasterizer. Geometry remains resident for
+ * collision and raster speed.
+ */
+static const uint8_t g_map_texture_streaming[MAP_COUNT] = {
+    0u, 0u, 1u, 1u, 1u, 1u, 1u
+};
+
+/*
  * Compact hull-1 centerline from the CT spawn to the T spawn. It was
  * generated from the authorized de_dust2 BSP at a 32-unit grid spacing.
  */
@@ -503,7 +521,6 @@ static int map_route_lane_point(
 static uint16_t g_screen[LITE_SCREEN_WIDTH * LITE_SCREEN_HEIGHT];
 static uint16_t g_depth[LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT]
     __attribute__((aligned(4)));
-static uint8_t g_texture_memory[TEXTURE_ARENA_BYTES];
 static uint8_t g_model_memory[MODEL_ARENA_BYTES];
 static uint8_t g_load_scratch[LOAD_SCRATCH_BYTES]
     __attribute__((aligned(4)));
@@ -664,7 +681,7 @@ static int resource_pack_is_current(uint32_t map_id)
     };
     uint32_t index;
     int complete = resource_pack_has(
-        "meta/m15", C15_FOURCC('V','E','R','0')
+        "meta/m17", C15_FOURCC('V','E','R','0')
     );
     if (!resource_pack_has(
             "sound/game", C15_FOURCC('S','N','D','0'))) {
@@ -1247,7 +1264,12 @@ static void draw_loading(
 
 static uint32_t buy_window_start(uint32_t selection)
 {
-    uint32_t total = BUY_ITEM_COUNT;
+    /*
+     * START ROUND is a fixed action in the lower-right corner, not an item
+     * in the scrolling catalogue. Keep navigation limited to purchasable
+     * weapons and equipment.
+     */
+    uint32_t total = BUY_ITEM_START;
     uint32_t start = selection > 2u ? selection - 2u : 0u;
     if (start + 5u > total) {
         start = total - 5u;
@@ -1274,12 +1296,7 @@ static void draw_buy_menu(
     for (row = 0u; row < 5u; ++row) {
         uint32_t item = start + row;
         int y = 88 + (int)row * 27;
-        if (item == BUY_ITEM_START) {
-            draw_button(
-                fb, 28, y, 194, 23, "START ROUND",
-                selection == item
-            );
-        } else if (item < WEAPON_COUNT) {
+        if (item < WEAPON_COUNT) {
             draw_button(
                 fb, 28, y, 158, 23, g_weapon_labels[item],
                 selection == item
@@ -1312,6 +1329,7 @@ static void draw_buy_menu(
             }
         }
     }
+    draw_button(fb, 232, 205, 82, 27, "START ROUND", 0);
 }
 
 static uint32_t movement_controls(const lite_input_t *input)
@@ -1809,15 +1827,15 @@ static int load_game_resources(
     lite_arena_reset(texture_arena);
     lite_arena_reset(model_arena);
     /*
-     * The historical splash occupied the texture arena only while the
-     * front-end menus were active. Map textures now reuse that memory;
-     * clear the pointer so the in-game buy menu cannot sample map data
-     * as if it were a 320x240 background image.
+     * The historical splash allocation is released before this function.
+     * Clear the pointer so the in-game buy menu cannot sample the new map
+     * texture allocation as if it were a 320x240 background image.
      */
     g_menu_background = 0;
     if (!c15_map_load(
             &g_map, &g_pak, g_map_assets[map_id],
             map_arena, texture_arena,
+            g_map_texture_streaming[map_id],
             g_load_scratch, sizeof(g_load_scratch))) {
         lite_log_line("load failed: map");
         lite_log_u32("map_load_error", g_map.load_error);
@@ -4756,6 +4774,11 @@ static uint32_t menu_touch_item(
     enum game_screen screen, int x, int y, uint32_t selection
 )
 {
+    if (screen == SCREEN_BUY &&
+        x >= 230 && x < (int)LITE_SCREEN_WIDTH &&
+        y >= 201 && y < (int)LITE_SCREEN_HEIGHT) {
+        return BUY_ITEM_START;
+    }
     if (x < 20 || x > 230) return 0xffffffffu;
     if (screen == SCREEN_MAIN) {
         if (y >= 84 && y < 122) return 0u;
@@ -4780,7 +4803,7 @@ static uint32_t menu_touch_item(
         if (y >= 86 && y < 226) {
             uint32_t row = (uint32_t)(y - 86) / 27u;
             uint32_t item = buy_window_start(selection) + row;
-            return item < BUY_ITEM_COUNT ? item : 0xffffffffu;
+            return item < BUY_ITEM_START ? item : 0xffffffffu;
         }
     }
     return 0xffffffffu;
@@ -4897,6 +4920,8 @@ int bda_main(void)
     size_t persistent_models = 0u;
     uint8_t *map_memory = 0;
     uint32_t map_memory_bytes = 0u;
+    uint8_t *texture_memory = 0;
+    uint32_t texture_memory_bytes = 0u;
 
     bda_memset(&input, 0, sizeof(input));
     bda_memset(&audio, 0, sizeof(audio));
@@ -4917,7 +4942,7 @@ int bda_main(void)
     bda_memset(grenade_counts, 0, sizeof(grenade_counts));
     camera.focal_length = DEFAULT_FOCAL_LENGTH;
     lite_log_reset();
-    lite_log_line("CS15 Lite M15 classic rounds start");
+    lite_log_line("CS15 Lite M17 original world textures start");
     lite_log_line(
         "game_flow=freeze-buy-drops-spectator-objectives-scoreboard"
     );
@@ -4926,13 +4951,15 @@ int bda_main(void)
         "bot_ai=roles-routes-last-seen-range-strafe-burst-grenades"
     );
     lite_log_line("map_memory=per-map-runtime-allocation");
+    lite_log_line("texture_memory=per-map-runtime-allocation");
+    lite_log_u32(
+        "map_working_set_limit_bytes", MAP_WORKING_SET_LIMIT_BYTES
+    );
     lite_log_line("bot_animation=goldsrc-hybrid-walk");
     lite_log_line("muzzle_flash=historical_additive_sprite");
     lite_log_line("audio=historical_pcm-stream");
     lite_arena_init(&map_arena, 0, 0u);
-    lite_arena_init(
-        &texture_arena, g_texture_memory, sizeof(g_texture_memory)
-    );
+    lite_arena_init(&texture_arena, 0, 0u);
     lite_arena_init(&model_arena, g_model_memory, sizeof(g_model_memory));
     framebuffer.pixels = g_screen;
     framebuffer.width = (int)LITE_SCREEN_WIDTH;
@@ -4967,6 +4994,15 @@ int bda_main(void)
         &audio, audio_enabled,
         g_load_scratch, sizeof(g_load_scratch)
     );
+    texture_memory_bytes = MENU_TEXTURE_ARENA_BYTES;
+    texture_memory = (uint8_t *)bda_alloc(texture_memory_bytes);
+    if (texture_memory) {
+        lite_arena_init(
+            &texture_arena, texture_memory, texture_memory_bytes
+        );
+    } else {
+        lite_log_line("menu texture allocation failed");
+    }
     if (!load_menu_background(&texture_arena)) {
         lite_log_line("historical menu splash unavailable");
     }
@@ -5113,11 +5149,54 @@ int bda_main(void)
                             running = 0;
                             continue;
                         }
+                        if (texture_memory) {
+                            bda_free(texture_memory);
+                            texture_memory = 0;
+                        }
+                        texture_memory_bytes =
+                            g_texture_arena_bytes[map_id];
+                        if (map_memory_bytes + texture_memory_bytes >
+                            MAP_WORKING_SET_LIMIT_BYTES) {
+                            lite_log_line(
+                                "map working set budget invalid"
+                            );
+                            running = 0;
+                            continue;
+                        }
+                        texture_memory = (uint8_t *)bda_alloc(
+                            texture_memory_bytes
+                        );
+                        if (!texture_memory) {
+                            draw_loading(
+                                &framebuffer,
+                                "NOT ENOUGH TEXTURE MEMORY",
+                                lite_rgb565(235u, 78u, 64u)
+                            );
+                            (void)lite_platform_present(g_screen);
+                            lite_log_u32(
+                                "texture_alloc_failed",
+                                texture_memory_bytes
+                            );
+                            running = 0;
+                            continue;
+                        }
                         lite_arena_init(
                             &map_arena, map_memory, map_memory_bytes
                         );
+                        lite_arena_init(
+                            &texture_arena, texture_memory,
+                            texture_memory_bytes
+                        );
                         lite_log_u32(
                             "map_alloc_bytes", map_memory_bytes
+                        );
+                        lite_log_u32(
+                            "texture_alloc_bytes",
+                            texture_memory_bytes
+                        );
+                        lite_log_u32(
+                            "map_working_set_bytes",
+                            map_memory_bytes + texture_memory_bytes
                         );
                         if (!load_game_resources(
                                 &map_arena, &texture_arena, &model_arena,
@@ -5212,7 +5291,7 @@ int bda_main(void)
                         game_loaded = 1;
                         screen = SCREEN_BUY;
                         selection = weapon;
-                        menu_count = BUY_ITEM_COUNT;
+                        menu_count = BUY_ITEM_START;
                         next_logic = now;
                         buy_deadline = now + BUY_TIME_MS;
                         round_deadline = 0u;
@@ -5227,6 +5306,14 @@ int bda_main(void)
                         lite_log_u32(
                             "texture_peak_bytes",
                             (uint32_t)texture_arena.peak
+                        );
+                        lite_log_u32(
+                            "texture_resident_if_eager_bytes",
+                            g_map.texture_resident_bytes
+                        );
+                        lite_log_u32(
+                            "texture_streaming",
+                            g_map.stream_textures
                         );
                         lite_log_u32(
                             "persistent_model_bytes",
@@ -5413,7 +5500,7 @@ int bda_main(void)
                         player.x, player.y, player.z)) {
                     screen = SCREEN_BUY;
                     selection = weapon;
-                    menu_count = BUY_ITEM_COUNT;
+                    menu_count = BUY_ITEM_START;
                 }
             }
             if (screen == SCREEN_PLAY &&
@@ -5989,7 +6076,7 @@ int bda_main(void)
                 );
                 screen = SCREEN_BUY;
                 selection = weapon;
-                menu_count = BUY_ITEM_COUNT;
+                menu_count = BUY_ITEM_START;
                 next_logic = now;
                 buy_deadline = now + BUY_TIME_MS;
                 round_deadline = 0u;
@@ -6137,6 +6224,12 @@ int bda_main(void)
             lite_log_u32("entity_pixels", entity_stats.pixels);
             lite_log_u32("view_triangles", view_stats.triangles);
             lite_log_u32("view_pixels", view_stats.pixels);
+            lite_log_u32(
+                "texture_cache_bytes", g_map.texture_cache_bytes
+            );
+            lite_log_u32(
+                "texture_cache_reloads", g_map.texture_cache_reloads
+            );
             lite_log_i32("bot0_x", bots[0].mover.x);
             lite_log_i32("bot0_y", bots[0].mover.y);
             lite_log_u32("bot0_nav", bots[0].nav_index);
@@ -6157,6 +6250,9 @@ int bda_main(void)
     lite_log_u32("map_peak_bytes", (uint32_t)map_arena.peak);
     lite_log_u32(
         "texture_peak_bytes", (uint32_t)texture_arena.peak
+    );
+    lite_log_u32(
+        "texture_cache_reloads", g_map.texture_cache_reloads
     );
     lite_log_u32("model_peak_bytes", (uint32_t)model_arena.peak);
     lite_log_u32("shots_fired", shots_fired);
@@ -6181,11 +6277,14 @@ int bda_main(void)
     c15_audio_stop(
         &audio, g_load_scratch, sizeof(g_load_scratch)
     );
-    lite_log_line("CS15 Lite M15 classic rounds stop");
+    lite_log_line("CS15 Lite M17 original world textures stop");
     lite_log_close();
     c15_pak_close(&g_pak);
     if (map_memory) {
         bda_free(map_memory);
+    }
+    if (texture_memory) {
+        bda_free(texture_memory);
     }
     lite_platform_close();
     return 0;

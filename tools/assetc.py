@@ -55,6 +55,8 @@ HOSTAGE = struct.Struct("<3h")
 ZONE = struct.Struct("<6hBB")
 DYNAMIC_ENTITY = struct.Struct("<BBH6hII")
 
+COMPRESSED_WORLD_TEXTURE_PROFILE = (32, 64)
+
 SOUND_CUE_SOURCES = (
     "weapons/knife_slash1.wav",
     "weapons/glock18-1.wav",
@@ -317,11 +319,34 @@ def rgb565(red: int, green: int, blue: int) -> int:
     return ((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3)
 
 
-def compile_texture(texture: MipTexture) -> tuple[bytes, dict[str, object]]:
+def compile_texture(
+    texture: MipTexture,
+    maximum_dimension: int | None = None,
+    palette_colors: int = 256,
+) -> tuple[bytes, dict[str, object]]:
     if texture.blob is None:
         raise AssetError(f"texture {texture.name} has no pixel data")
+    if (
+        maximum_dimension is not None
+        and maximum_dimension not in (16, 32, 64, 128, 256)
+    ):
+        raise AssetError(
+            f"texture {texture.name} has invalid target dimension "
+            f"{maximum_dimension}"
+        )
+    if palette_colors not in (64, 256):
+        raise AssetError(
+            f"texture {texture.name} has invalid palette size "
+            f"{palette_colors}"
+        )
     level = 0
-    while level < 3 and max(texture.width >> level, texture.height >> level) > 32:
+    while (
+        maximum_dimension is not None
+        and
+        level < 3
+        and max(texture.width >> level, texture.height >> level)
+        > maximum_dimension
+    ):
         level += 1
     width = max(1, texture.width >> level)
     height = max(1, texture.height >> level)
@@ -346,43 +371,53 @@ def compile_texture(texture: MipTexture) -> tuple[bytes, dict[str, object]]:
         raise AssetError(f"texture {texture.name} palette is truncated")
     palette_source = texture.blob[palette_offset : palette_offset + 256 * 3]
     flags = 1 if texture.name.startswith("{") else 0
-    histogram = Counter(source_pixels)
-    sums = [[0, 0, 0, 0] for _ in range(64)]
-    remap = bytearray(256)
-    for index in range(256):
-        red, green, blue = palette_source[index * 3 : index * 3 + 3]
-        target = ((red >> 6) << 4) | ((green >> 6) << 2) | (blue >> 6)
-        if flags and index == 255:
-            target = 63
-        elif flags and target == 63:
-            target = 62
-        remap[index] = target
-        weight = histogram.get(index, 0)
-        if weight:
-            sums[target][0] += red * weight
-            sums[target][1] += green * weight
-            sums[target][2] += blue * weight
-            sums[target][3] += weight
     palette = bytearray()
-    for index, (red, green, blue, weight) in enumerate(sums):
-        if flags and index == 63:
-            red, green, blue = 0, 0, 255
-        elif weight:
-            red //= weight
-            green //= weight
-            blue //= weight
-        else:
-            red = ((index >> 4) & 3) * 85
-            green = ((index >> 2) & 3) * 85
-            blue = (index & 3) * 85
-        palette += struct.pack("<H", rgb565(red, green, blue))
-    pixels = bytes(remap[index] for index in source_pixels)
+    if palette_colors == 256:
+        for index in range(256):
+            red, green, blue = palette_source[index * 3 : index * 3 + 3]
+            palette += struct.pack("<H", rgb565(red, green, blue))
+        pixels = source_pixels
+    else:
+        histogram = Counter(source_pixels)
+        sums = [[0, 0, 0, 0] for _ in range(64)]
+        remap = bytearray(256)
+        for index in range(256):
+            red, green, blue = palette_source[index * 3 : index * 3 + 3]
+            target = (
+                ((red >> 6) << 4)
+                | ((green >> 6) << 2)
+                | (blue >> 6)
+            )
+            if flags and index == 255:
+                target = 63
+            elif flags and target == 63:
+                target = 62
+            remap[index] = target
+            weight = histogram.get(index, 0)
+            if weight:
+                sums[target][0] += red * weight
+                sums[target][1] += green * weight
+                sums[target][2] += blue * weight
+                sums[target][3] += weight
+        for index, (red, green, blue, weight) in enumerate(sums):
+            if flags and index == 63:
+                red, green, blue = 0, 0, 255
+            elif weight:
+                red //= weight
+                green //= weight
+                blue //= weight
+            else:
+                red = ((index >> 4) & 3) * 85
+                green = ((index >> 2) & 3) * 85
+                blue = (index & 3) * 85
+            palette += struct.pack("<H", rgb565(red, green, blue))
+        pixels = bytes(remap[index] for index in source_pixels)
     header = TEX_HEADER.pack(
         b"CTX1",
         width,
         height,
         flags,
-        64,
+        palette_colors,
         len(pixels),
         texture.width,
         texture.height,
@@ -398,6 +433,8 @@ def compile_texture(texture: MipTexture) -> tuple[bytes, dict[str, object]]:
         "width": width,
         "height": height,
         "selected_mip": level,
+        "maximum_dimension": maximum_dimension,
+        "palette_colors": palette_colors,
         "resident_bytes": len(palette) + len(pixels),
         "chunk_bytes": len(output),
         "transparent": bool(flags),
@@ -2828,8 +2865,15 @@ def build_command(args: argparse.Namespace) -> None:
     for map_name, map_path in map_sources:
         bsp = GoldSrcBsp(map_path)
         references = parse_bsp_textures(bsp)
+        if args.compress_world_textures:
+            maximum_dimension, palette_colors = (
+                COMPRESSED_WORLD_TEXTURE_PROFILE
+            )
+        else:
+            maximum_dimension, palette_colors = None, 256
         runtime_references: list[MipTexture] = []
         selected_mips: list[int] = []
+        map_texture_assets: list[str] = []
         missing_for_map: list[str] = []
         for reference in references:
             texture = resolve_texture(reference, wad_index)
@@ -2837,7 +2881,11 @@ def build_command(args: argparse.Namespace) -> None:
                 missing_for_map.append(reference.name)
                 chunk, detail = placeholder_texture(reference)
             else:
-                chunk, detail = compile_texture(texture)
+                chunk, detail = compile_texture(
+                    texture,
+                    maximum_dimension=maximum_dimension,
+                    palette_colors=palette_colors,
+                )
             selected_mips.append(int(detail["selected_mip"]))
             runtime_reference = reference
             asset_name = f"tex/{runtime_reference.name}"
@@ -2862,11 +2910,14 @@ def build_command(args: argparse.Namespace) -> None:
                 )
                 previous = collision
             runtime_references.append(runtime_reference)
+            if asset_name not in map_texture_assets:
+                map_texture_assets.append(asset_name)
             if previous is None:
                 texture_assets[asset_name] = PakAsset(
                     b"TEX0", asset_name, chunk
                 )
                 stored_detail = dict(detail)
+                stored_detail["runtime_asset"] = asset_name
                 stored_detail["used_by_maps"] = [map_name]
                 texture_details[asset_name] = stored_detail
             else:
@@ -2890,6 +2941,16 @@ def build_command(args: argparse.Namespace) -> None:
             bsp, runtime_references, selected_mips
         )
         bsp_detail["name"] = map_name
+        bsp_detail["texture_profile"] = {
+            "compressed": bool(args.compress_world_textures),
+            "maximum_dimension": maximum_dimension,
+            "palette_colors": palette_colors,
+        }
+        bsp_detail["texture_assets"] = map_texture_assets
+        bsp_detail["resident_texture_bytes"] = sum(
+            int(texture_details[name]["resident_bytes"])
+            for name in map_texture_assets
+        )
         map_assets.append(PakAsset(
             b"BSP0", f"maps/{map_name}", bsp_chunk
         ))
@@ -3027,7 +3088,8 @@ def build_command(args: argparse.Namespace) -> None:
         assets.append(PakAsset(b"SND0", "sound/game", sound_chunk))
         sound_manifest.append(sound_detail)
     assets.append(PakAsset(
-        b"VER0", "meta/m15", b"CS15LITE-M15-MAPS-DROPS-SPECTATOR-TACTICS\0"
+        b"VER0", "meta/m17",
+        b"CS15LITE-M17-OPTIONAL-WORLD-TEXTURE-COMPRESSION\0"
     ))
     pack = build_pack(assets)
     validation = validate_pack(pack)
@@ -3037,7 +3099,10 @@ def build_command(args: argparse.Namespace) -> None:
     manifest = {
         "format": "CS15 Lite asset manifest",
         "format_version": 1,
-        "runtime_resource_revision": "M15",
+        "runtime_resource_revision": "M17",
+        "world_texture_compression": bool(
+            args.compress_world_textures
+        ),
         "map": map_manifest[0],
         "maps": map_manifest,
         "textures": texture_manifest,
@@ -3148,7 +3213,14 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--audio",
         action="store_true",
-        help="compile the M15 historical combat/objective cues into sound/game",
+        help="compile historical combat/objective cues into sound/game",
+    )
+    build.add_argument(
+        "--compress-world-textures",
+        action="store_true",
+        help="opt into the v0.3.1 low-memory world texture profile "
+             "(maximum 32-pixel mip and 64-colour palette); disabled by "
+             "default so original mip 0 and all 256 colours are retained",
     )
     build.add_argument(
         "--allow-missing",

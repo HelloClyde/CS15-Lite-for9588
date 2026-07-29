@@ -6,7 +6,7 @@ repository members who are authorized to use the source resources. Do not
 redistribute the pack or expose it through a public release. You can also build
 it locally from resources you are authorized to use.
 
-The source archive consumed by final M15 tag builds must include its SHA-256
+The source archive consumed by final M17 tag builds must include its SHA-256
 sidecar and use this layout:
 
 ```text
@@ -37,10 +37,21 @@ $valve = 'D:\Games\Half-Life\valve'
 ```
 
 If `valve` is next to `cstrike`, the PowerShell wrapper discovers it
-automatically. `cs_assault` uses many Half-Life base textures, so a final M15
+automatically. `cs_assault` uses many Half-Life base textures, so a final M17
 pack must include `halflife.wad`. `-AllowMissing` remains available only for
 converter development; it emits visible 16x16 placeholders and must not be
 used for a release acceptance build.
+
+World-texture compression is disabled by default. The normal build keeps the
+source mip level 0 and all 256 palette entries. For a deliberately low-memory
+test pack, opt into the old 32-pixel/64-colour profile explicitly:
+
+```powershell
+.\tools\build-resource-pack.ps1 `
+  -Cstrike $cstrike `
+  -Valve $valve `
+  -CompressWorldTextures
+```
 
 ## Validate
 
@@ -60,9 +71,9 @@ A:\应用\数据\CS15LITE\CS15.C15PAK
 ```
 
 When upgrading, delete the old `CS15.C15PAK` before copying the replacement.
-The M15 seven-map pack is about 11 MB, and overwriting it in place can fail on
-a fragmented 9588 FAT volume even when the total free-space counter looks
-large enough.
+The default M17 seven-map pack is about 19 MB, and overwriting it in place can
+fail on a fragmented 9588 FAT volume even when the total free-space counter
+looks large enough.
 
 The BDA and pack must use the same runtime resource revision. An outdated
 pack is stopped before map loading.

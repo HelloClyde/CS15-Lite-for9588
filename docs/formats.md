@@ -38,7 +38,7 @@ uint32   reserved
 
 Version 2 stores chunks uncompressed and requires directory entries to be
 strictly sorted by `asset_id`. The 9588 keeps only the 20-byte package handle
-and binary-searches the on-disk directory, instead of retaining all M15
+and binary-searches the on-disk directory, instead of retaining the complete
 records in RAM. The target rejects unsorted/duplicate IDs, overlapping chunks,
 out-of-file offsets, bad CRCs, unsupported compression, or a file-size
 mismatch.
@@ -147,12 +147,16 @@ uint16   palette[]       preconverted RGB565
 uint8    pixels[]
 ```
 
-World textures select the first authored GoldSrc mip whose largest dimension
-is at most 32 and are quantized offline to a 64-color RGB565 palette. Model
-texture limits are selected per asset (16 for player skins, 32 for view
-models, at most 64 for held models) and retain 256 colors. Runtime memory is
-therefore `width*height + palette_count*2`, with no RGBA expansion or runtime
-resampling.
+World textures keep the authored GoldSrc mip level 0 and all 256 RGB565
+palette entries by default. `--compress-world-textures` is an explicit
+low-memory option that selects an authored mip no larger than 32 pixels and
+quantizes it to 64 colours. Model texture limits remain selected per asset
+(16 for player skins, 32 for view models, at most 64 for held models) and
+retain 256 colors. Runtime memory is therefore
+`width*height + palette_count*2`, with no RGBA expansion or runtime
+resampling. Large maps prefetch front-facing `TEX0` entries referenced by the
+current PVS into a bounded cache and page an actually drawn material on
+demand when the conservative set is larger than the cache.
 
 ## `C15MDL` version 1
 
@@ -268,7 +272,7 @@ uint8    pixels[]        two 4-bit indices per byte, low nibble first
 ```
 
 There is one weapon-specific `MSP0` entry for every firearm in the 23-item
-M15 weapon table (Knife has no muzzle flash). Although weapons share the
+M17 weapon table (Knife has no muzzle flash). Although weapons share the
 historical sprite art, their baked StudioMDL attachment tracks differ. At
 runtime the current attachment is projected with the same view-model
 placement, recoil and bob as the weapon.

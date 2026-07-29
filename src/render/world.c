@@ -9,7 +9,7 @@
 #define NEAR_PLANE 8
 #define DEFAULT_FOCAL_LENGTH ((int)LITE_VIEW_WIDTH / 2)
 #define SURF_PLANEBACK 0x8000u
-/* M15 peak visible set: cs_office; keep room for all converted surfaces. */
+/* M17 peak visible set: cs_office; keep room for all converted surfaces. */
 #define MAX_CACHED_VISIBLE_SURFACES 1536u
 
 typedef struct view_vertex {
@@ -539,7 +539,7 @@ static void clear_depth_buffer(uint16_t *depth)
 }
 
 void c15_render_world(
-    const c15_map_t *map,
+    c15_map_t *map,
     const c15_camera_t *camera,
     lite_framebuffer_t *framebuffer,
     uint16_t *depth,
@@ -551,6 +551,7 @@ void c15_render_world(
     const c15_map_section_t *surface_section =
         map ? map->surface_section : 0;
     uint32_t list_index;
+    int visibility_changed = 0;
     int camera_leaf;
     int32_t sine = sin_q14_q8(camera->yaw_q8);
     int32_t cosine = cos_q14_q8(camera->yaw_q8);
@@ -604,6 +605,33 @@ void c15_render_world(
         g_cached_map = map;
         g_cached_surface_bits = visible_surface_bits;
         g_cached_leaf = camera_leaf;
+        visibility_changed = 1;
+    }
+    if (visibility_changed &&
+        map->stream_textures) {
+        /*
+         * The PVS includes back-facing surfaces. Remove those from the
+         * texture prefetch set so original-resolution packs do not spend the
+         * 2 MiB working set on materials that cannot be drawn from here.
+         */
+        for (list_index = 0u;
+             list_index < g_cached_surface_count; ++list_index) {
+            uint32_t surface_index =
+                g_cached_surface_indices[list_index];
+            c15_surface_t surface;
+            if (!c15_map_surface(map, surface_index, &surface) ||
+                surface.texture_id >= map->texture_count ||
+                map->textures[surface.texture_id].special ||
+                !surface_front(map, camera, &surface)) {
+                visible_surface_bits[surface_index >> 3] &=
+                    (uint8_t)~(1u << (surface_index & 7u));
+            }
+        }
+        if (!c15_map_prepare_visible_textures(
+                map, visible_surface_bits, visible_surface_bytes)) {
+            g_cached_leaf = -1;
+            return;
+        }
     }
     stats->visible_leaves = g_cached_visible_leaves;
     stats->visible_surfaces = g_cached_surface_count;
@@ -629,10 +657,11 @@ void c15_render_world(
             !surface_front(map, camera, &surface)) {
             continue;
         }
-        texture = &map->textures[surface.texture_id];
-        if (texture->special) {
+        if (map->textures[surface.texture_id].special ||
+            !c15_map_ensure_texture(map, surface.texture_id)) {
             continue;
         }
+        texture = &map->textures[surface.texture_id];
         for (vertex = 0u; vertex < surface.vertex_count; ++vertex) {
             c15_surface_vertex_t source;
             if (!c15_map_vertex(

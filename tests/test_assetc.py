@@ -37,7 +37,7 @@ class AssetFormatTests(unittest.TestCase):
         self.assertEqual(result["entries"][0]["name"], "tex/test")
         self.assertEqual(len(pack) % 1, 0)
 
-    def test_world_texture_is_mip_selected_and_quantized_to_64_colors(self):
+    def test_world_texture_defaults_to_original_mip_and_palette(self):
         width = 64
         height = 32
         mip_sizes = [
@@ -66,10 +66,23 @@ class AssetFormatTests(unittest.TestCase):
         )
         chunk, detail = assetc.compile_texture(texture)
         validated = assetc.validate_texture_chunk(chunk)
-        self.assertEqual(detail["selected_mip"], 1)
-        self.assertEqual((detail["width"], detail["height"]), (32, 16))
-        self.assertEqual(validated["palette_colors"], 64)
-        self.assertEqual(validated["resident_bytes"], 64 * 2 + 32 * 16)
+        self.assertEqual(detail["selected_mip"], 0)
+        self.assertEqual((detail["width"], detail["height"]), (64, 32))
+        self.assertEqual(validated["palette_colors"], 256)
+        self.assertEqual(validated["resident_bytes"], 256 * 2 + 64 * 32)
+
+        compact_chunk, compact_detail = assetc.compile_texture(
+            texture, maximum_dimension=32, palette_colors=64
+        )
+        compact_validated = assetc.validate_texture_chunk(compact_chunk)
+        self.assertEqual(compact_detail["selected_mip"], 1)
+        self.assertEqual(
+            (compact_detail["width"], compact_detail["height"]), (32, 16)
+        )
+        self.assertEqual(compact_validated["palette_colors"], 64)
+        self.assertEqual(
+            compact_validated["resident_bytes"], 64 * 2 + 32 * 16
+        )
 
     def test_corrupt_pack_crc_is_rejected(self):
         texture = assetc.TEX_HEADER.pack(

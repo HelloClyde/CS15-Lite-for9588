@@ -16,7 +16,7 @@ typedef struct c15_render_stats {
 } c15_render_stats_t;
 
 void c15_render_world(
-    const c15_map_t *map,
+    c15_map_t *map,
     const c15_camera_t *camera,
     lite_framebuffer_t *framebuffer,
     uint16_t *depth,

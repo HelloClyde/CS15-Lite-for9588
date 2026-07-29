@@ -234,7 +234,88 @@ static int cache_sections(c15_map_t *map)
         map->ladder_section && map->dynamic_section;
 }
 
-static int load_textures(c15_map_t *map, lite_arena_t *arena)
+static int load_texture_pixels(
+    c15_map_t *map, c15_texture_t *texture
+)
+{
+    c15_pak_entry_t entry;
+    uint8_t *storage;
+    uint32_t palette_bytes;
+    if (texture->special) {
+        texture->loaded = 1u;
+        return 1;
+    }
+    if (texture->loaded) {
+        return 1;
+    }
+    bda_memset(&entry, 0, sizeof(entry));
+    entry.offset = texture->entry_offset;
+    entry.packed_size = texture->entry_size;
+    storage = (uint8_t *)lite_arena_alloc(
+        map->texture_arena, texture->resident_bytes, 16u
+    );
+    if (!storage ||
+        !c15_pak_read(
+            map->pak, &entry, TEX_HEADER_BYTES,
+            storage, texture->resident_bytes)) {
+        return 0;
+    }
+    palette_bytes = (uint32_t)texture->palette_count * 2u;
+    texture->palette = (const uint16_t *)storage;
+    texture->pixels = storage + palette_bytes;
+    texture->loaded = 1u;
+    map->texture_cache_bytes =
+        (uint32_t)map->texture_arena->used;
+    return 1;
+}
+
+static void clear_loaded_textures(c15_map_t *map)
+{
+    uint32_t index;
+    lite_arena_reset(map->texture_arena);
+    for (index = 0u; index < map->texture_count; ++index) {
+        c15_texture_t *texture = &map->textures[index];
+        texture->palette = 0;
+        texture->pixels = 0;
+        texture->loaded = texture->special;
+    }
+    map->texture_cache_bytes = 0u;
+}
+
+int c15_map_ensure_texture(c15_map_t *map, uint32_t texture_index)
+{
+    c15_texture_t *texture;
+    size_t aligned_used;
+    if (!map || !map->loaded || !map->texture_arena ||
+        texture_index >= map->texture_count) {
+        return 0;
+    }
+    texture = &map->textures[texture_index];
+    if (texture->special || texture->loaded) {
+        return 1;
+    }
+    if (texture->resident_bytes > map->texture_arena->capacity) {
+        map->load_error = 12u;
+        return 0;
+    }
+    aligned_used =
+        (map->texture_arena->used + 15u) & ~(size_t)15u;
+    if (aligned_used > map->texture_arena->capacity ||
+        texture->resident_bytes >
+            map->texture_arena->capacity - aligned_used) {
+        clear_loaded_textures(map);
+        ++map->texture_cache_reloads;
+    }
+    if (!load_texture_pixels(map, texture)) {
+        map->load_error = 13u;
+        return 0;
+    }
+    return 1;
+}
+
+static int load_textures(
+    c15_map_t *map, lite_arena_t *arena, int stream_textures
+)
 {
     const c15_map_section_t *names = c15_map_section(
         map, C15_FOURCC('T','N','A','M')
@@ -251,7 +332,6 @@ static int load_textures(c15_map_t *map, lite_arena_t *arena)
         char asset_name[32];
         uint8_t header[TEX_HEADER_BYTES];
         c15_pak_entry_t entry;
-        uint8_t *storage;
         uint32_t resident;
         uint32_t palette_bytes;
         uint32_t name_index;
@@ -259,6 +339,9 @@ static int load_textures(c15_map_t *map, lite_arena_t *arena)
             texture->name[name_index] = (char)source_name[name_index];
         }
         texture->name[16] = 0;
+        texture->palette = 0;
+        texture->pixels = 0;
+        texture->loaded = 0u;
         build_name(asset_name, "tex/", texture->name);
         if (!c15_pak_find(map->pak, asset_name, &entry) ||
             entry.type != C15_FOURCC('T','E','X','0') ||
@@ -281,14 +364,9 @@ static int load_textures(c15_map_t *map, lite_arena_t *arena)
             entry.packed_size != TEX_HEADER_BYTES + resident) {
             return 0;
         }
-        storage = (uint8_t *)lite_arena_alloc(arena, resident, 16u);
-        if (!storage ||
-            !c15_pak_read(
-                map->pak, &entry, TEX_HEADER_BYTES, storage, resident)) {
-            return 0;
-        }
-        texture->palette = (const uint16_t *)storage;
-        texture->pixels = storage + palette_bytes;
+        texture->entry_offset = entry.offset;
+        texture->entry_size = entry.packed_size;
+        texture->resident_bytes = resident;
         texture->width_mask = is_power_of_two(texture->width) ?
             (uint16_t)(texture->width - 1u) : 0u;
         texture->height_mask = is_power_of_two(texture->height) ?
@@ -303,6 +381,109 @@ static int load_textures(c15_map_t *map, lite_arena_t *arena)
             starts_with(texture->name, "clip") ||
             starts_with(texture->name, "origin")
         );
+        if (!texture->special) {
+            map->texture_resident_bytes += resident;
+        }
+    }
+    map->texture_arena = arena;
+    map->stream_textures = stream_textures ? 1u : 0u;
+    if (!map->stream_textures) {
+        for (index = 0u; index < map->texture_count; ++index) {
+            if (!load_texture_pixels(map, &map->textures[index])) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+int c15_map_prepare_visible_textures(
+    c15_map_t *map,
+    const uint8_t *surface_bits,
+    uint32_t surface_bits_size
+)
+{
+    uint8_t required[(C15_MAP_MAX_TEXTURES + 7u) / 8u];
+    const c15_map_section_t *surfaces =
+        map ? map->surface_section : 0;
+    size_t projected_used;
+    uint32_t surface_index;
+    uint32_t texture_index;
+    int complete = 1;
+    if (!map || !map->loaded || !map->texture_arena ||
+        !surface_bits || !surfaces ||
+        surface_bits_size < (surfaces->count + 7u) / 8u) {
+        return 0;
+    }
+    if (!map->stream_textures) {
+        return 1;
+    }
+    bda_memset(required, 0, sizeof(required));
+    for (surface_index = 0u;
+         surface_index < surfaces->count; ++surface_index) {
+        c15_surface_t surface;
+        if ((surface_bits[surface_index >> 3] &
+             (uint8_t)(1u << (surface_index & 7u))) == 0u ||
+            !c15_map_surface(map, surface_index, &surface) ||
+            surface.texture_id >= map->texture_count ||
+            map->textures[surface.texture_id].special) {
+            continue;
+        }
+        required[surface.texture_id >> 3] |=
+            (uint8_t)(1u << (surface.texture_id & 7u));
+    }
+    projected_used = map->texture_arena->used;
+    for (texture_index = 0u;
+         texture_index < map->texture_count; ++texture_index) {
+        c15_texture_t *texture = &map->textures[texture_index];
+        if ((required[texture_index >> 3] &
+             (uint8_t)(1u << (texture_index & 7u))) == 0u ||
+            texture->loaded) {
+            continue;
+        }
+        projected_used = (projected_used + 15u) & ~(size_t)15u;
+        if (projected_used > map->texture_arena->capacity ||
+            texture->resident_bytes >
+                map->texture_arena->capacity - projected_used) {
+            complete = 0;
+            break;
+        }
+        projected_used += texture->resident_bytes;
+    }
+    if (!complete) {
+        clear_loaded_textures(map);
+        ++map->texture_cache_reloads;
+    }
+    for (texture_index = 0u;
+         texture_index < map->texture_count; ++texture_index) {
+        c15_texture_t *texture = &map->textures[texture_index];
+        size_t aligned_used;
+        if ((required[texture_index >> 3] &
+             (uint8_t)(1u << (texture_index & 7u))) == 0u ||
+            texture->loaded) {
+            continue;
+        }
+        if (texture->resident_bytes > map->texture_arena->capacity) {
+            map->load_error = 12u;
+            return 0;
+        }
+        aligned_used =
+            (map->texture_arena->used + 15u) & ~(size_t)15u;
+        /*
+         * A GoldSrc PVS is deliberately conservative and can reference more
+         * original-resolution materials than the bounded cache can hold.
+         * Leave the tail deferred; the renderer pages an actually drawn
+         * material in with c15_map_ensure_texture().
+         */
+        if (aligned_used > map->texture_arena->capacity ||
+            texture->resident_bytes >
+                map->texture_arena->capacity - aligned_used) {
+            break;
+        }
+        if (!load_texture_pixels(map, texture)) {
+            map->load_error = 13u;
+            return 0;
+        }
     }
     return 1;
 }
@@ -736,6 +917,7 @@ int c15_map_load(
     const char *map_name,
     lite_arena_t *map_arena,
     lite_arena_t *texture_arena,
+    int stream_textures,
     void *scratch,
     uint32_t scratch_size
 )
@@ -765,7 +947,7 @@ int c15_map_load(
         map->load_error = 9u;
         return 0;
     }
-    if (!load_textures(map, texture_arena)) {
+    if (!load_textures(map, texture_arena, stream_textures)) {
         map->load_error = 10u;
         return 0;
     }
@@ -774,6 +956,23 @@ int c15_map_load(
         return 0;
     }
     map->loaded = 1;
+    if (map->stream_textures) {
+        uint32_t visible_bytes =
+            (map->surface_section->count + 7u) / 8u;
+        uint32_t visible_leaves;
+        if (visible_bytes > scratch_size ||
+            !c15_map_build_visible(
+                map, &map->spawn, (uint8_t *)scratch,
+                visible_bytes, &visible_leaves) ||
+            !c15_map_prepare_visible_textures(
+                map, (const uint8_t *)scratch, visible_bytes)) {
+            map->loaded = 0;
+            if (map->load_error == 0u) {
+                map->load_error = 14u;
+            }
+            return 0;
+        }
+    }
     return 1;
 }
 

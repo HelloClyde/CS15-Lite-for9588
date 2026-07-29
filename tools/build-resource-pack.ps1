@@ -9,6 +9,8 @@ param(
 
     [string]$Manifest,
 
+    [switch]$CompressWorldTextures,
+
     [switch]$AllowMissing
 )
 
@@ -114,6 +116,9 @@ if ($valveRoot) {
 }
 if ($AllowMissing) {
     $arguments += '--allow-missing'
+}
+if ($CompressWorldTextures) {
+    $arguments += '--compress-world-textures'
 }
 
 & $python @arguments
