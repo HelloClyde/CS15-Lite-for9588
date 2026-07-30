@@ -9,9 +9,8 @@
 #define DEFAULT_FOCAL_LENGTH 160u
 #define TEX_HEADER_BYTES 24u
 #define BSP_SECTION_STREAMED 1u
-#define C15_MAX_VISIBILITY_ROW_BYTES 512u
 #define C15_MAX_ENCODED_VISIBILITY_BYTES \
-    (C15_MAX_VISIBILITY_ROW_BYTES * 2u)
+    (C15_MAP_VISIBILITY_BYTES * 2u)
 
 static uint16_t read_u16(const uint8_t *data)
 {
@@ -71,6 +70,26 @@ static int starts_with(const char *text, const char *prefix)
 static int is_power_of_two(uint16_t value)
 {
     return value != 0u && (value & (uint16_t)(value - 1u)) == 0u;
+}
+
+static uint16_t shade_palette_color(uint16_t color, uint32_t level)
+{
+    if (level == 0u) {
+        return (uint16_t)((color & 0xe79cu) >> 2);
+    }
+    if (level == 1u) {
+        return (uint16_t)((color & 0xf7deu) >> 1);
+    }
+    return (uint16_t)(
+        ((color & 0xf7deu) >> 1) +
+        ((color & 0xe79cu) >> 2)
+    );
+}
+
+static uint32_t texture_runtime_bytes(const c15_texture_t *texture)
+{
+    return texture->runtime_bytes != 0u ?
+        texture->runtime_bytes : texture->resident_bytes;
 }
 
 const c15_map_section_t *c15_map_section(
@@ -241,6 +260,8 @@ static int load_texture_pixels(
     c15_pak_entry_t entry;
     uint8_t *storage;
     uint32_t palette_bytes;
+    uint32_t palette_index;
+    uint32_t shade_level;
     if (texture->special) {
         texture->loaded = 1u;
         return 1;
@@ -252,7 +273,7 @@ static int load_texture_pixels(
     entry.offset = texture->entry_offset;
     entry.packed_size = texture->entry_size;
     storage = (uint8_t *)lite_arena_alloc(
-        map->texture_arena, texture->resident_bytes, 16u
+        map->texture_arena, texture_runtime_bytes(texture), 16u
     );
     if (!storage ||
         !c15_pak_read(
@@ -263,6 +284,26 @@ static int load_texture_pixels(
     palette_bytes = (uint32_t)texture->palette_count * 2u;
     texture->palette = (const uint16_t *)storage;
     texture->pixels = storage + palette_bytes;
+    texture->shade_palettes = 0;
+    if (texture_runtime_bytes(texture) >=
+        texture->resident_bytes + palette_bytes * 3u) {
+        texture->shade_palettes = (const uint16_t *)(
+            storage + texture->resident_bytes
+        );
+        for (shade_level = 0u; shade_level < 3u; ++shade_level) {
+            uint16_t *destination = (uint16_t *)(uintptr_t)(
+                texture->shade_palettes +
+                shade_level * texture->palette_count
+            );
+            for (palette_index = 0u;
+                 palette_index < texture->palette_count;
+                 ++palette_index) {
+                destination[palette_index] = shade_palette_color(
+                    texture->palette[palette_index], shade_level
+                );
+            }
+        }
+    }
     texture->loaded = 1u;
     map->texture_cache_bytes =
         (uint32_t)map->texture_arena->used;
@@ -276,6 +317,7 @@ static void clear_loaded_textures(c15_map_t *map)
     for (index = 0u; index < map->texture_count; ++index) {
         c15_texture_t *texture = &map->textures[index];
         texture->palette = 0;
+        texture->shade_palettes = 0;
         texture->pixels = 0;
         texture->loaded = texture->special;
     }
@@ -294,14 +336,15 @@ int c15_map_ensure_texture(c15_map_t *map, uint32_t texture_index)
     if (texture->special || texture->loaded) {
         return 1;
     }
-    if (texture->resident_bytes > map->texture_arena->capacity) {
+    if (texture_runtime_bytes(texture) >
+        map->texture_arena->capacity) {
         map->load_error = 12u;
         return 0;
     }
     aligned_used =
         (map->texture_arena->used + 15u) & ~(size_t)15u;
     if (aligned_used > map->texture_arena->capacity ||
-        texture->resident_bytes >
+        texture_runtime_bytes(texture) >
             map->texture_arena->capacity - aligned_used) {
         clear_loaded_textures(map);
         ++map->texture_cache_reloads;
@@ -340,6 +383,7 @@ static int load_textures(
         }
         texture->name[16] = 0;
         texture->palette = 0;
+        texture->shade_palettes = 0;
         texture->pixels = 0;
         texture->loaded = 0u;
         build_name(asset_name, "tex/", texture->name);
@@ -367,6 +411,7 @@ static int load_textures(
         texture->entry_offset = entry.offset;
         texture->entry_size = entry.packed_size;
         texture->resident_bytes = resident;
+        texture->runtime_bytes = resident + palette_bytes * 3u;
         texture->width_mask = is_power_of_two(texture->width) ?
             (uint16_t)(texture->width - 1u) : 0u;
         texture->height_mask = is_power_of_two(texture->height) ?
@@ -382,7 +427,7 @@ static int load_textures(
             starts_with(texture->name, "origin")
         );
         if (!texture->special) {
-            map->texture_resident_bytes += resident;
+            map->texture_resident_bytes += texture->runtime_bytes;
         }
     }
     map->texture_arena = arena;
@@ -443,12 +488,12 @@ int c15_map_prepare_visible_textures(
         }
         projected_used = (projected_used + 15u) & ~(size_t)15u;
         if (projected_used > map->texture_arena->capacity ||
-            texture->resident_bytes >
+            texture_runtime_bytes(texture) >
                 map->texture_arena->capacity - projected_used) {
             complete = 0;
             break;
         }
-        projected_used += texture->resident_bytes;
+        projected_used += texture_runtime_bytes(texture);
     }
     if (!complete) {
         clear_loaded_textures(map);
@@ -463,7 +508,8 @@ int c15_map_prepare_visible_textures(
             texture->loaded) {
             continue;
         }
-        if (texture->resident_bytes > map->texture_arena->capacity) {
+        if (texture_runtime_bytes(texture) >
+            map->texture_arena->capacity) {
             map->load_error = 12u;
             return 0;
         }
@@ -476,7 +522,7 @@ int c15_map_prepare_visible_textures(
          * material in with c15_map_ensure_texture().
          */
         if (aligned_used > map->texture_arena->capacity ||
-            texture->resident_bytes >
+            texture_runtime_bytes(texture) >
                 map->texture_arena->capacity - aligned_used) {
             break;
         }
@@ -932,8 +978,9 @@ int c15_map_load(
      * Do not rescan the complete BSP entry here. Large FAT files on the
      * device are read through a cluster chain and the redundant pass both
      * delays map entry and can fail after otherwise valid long seeks.
-     * load_sections validates the BSP header and every resident section CRC;
-     * streamed visibility data remains bounds-checked on each read.
+     * load_sections validates the BSP header and every resident section CRC.
+     * The streamed visibility path remains for old development packs, but
+     * release packs make VISI resident to avoid mid-round FAT seeks.
      */
     if (!c15_pak_find(pak, map_name, &map->entry) ||
         map->entry.type != C15_FOURCC('B','S','P','0')) {
@@ -963,7 +1010,7 @@ int c15_map_load(
         if (visible_bytes > scratch_size ||
             !c15_map_build_visible(
                 map, &map->spawn, (uint8_t *)scratch,
-                visible_bytes, &visible_leaves) ||
+                visible_bytes, 0, 0u, &visible_leaves) ||
             !c15_map_prepare_visible_textures(
                 map, (const uint8_t *)scratch, visible_bytes)) {
             map->loaded = 0;
@@ -1103,6 +1150,8 @@ int c15_map_build_visible(
     const c15_camera_t *camera,
     uint8_t *surface_bits,
     uint32_t surface_bits_size,
+    uint8_t *visible_leaf_bits,
+    uint32_t visible_leaf_bits_size,
     uint32_t *visible_leaf_count
 )
 {
@@ -1117,7 +1166,7 @@ int c15_map_build_visible(
      * Historical cs_office is the largest supported PVS row. Allow up to
      * 4096 world visibility leaves and the worst-case zero-run encoding.
      */
-    uint8_t leaf_bits[C15_MAX_VISIBILITY_ROW_BYTES];
+    uint8_t leaf_bits[C15_MAP_VISIBILITY_BYTES];
     uint8_t encoded_visibility[C15_MAX_ENCODED_VISIBILITY_BYTES];
     const uint8_t *visibility_data;
     uint32_t visibility_size;
@@ -1134,8 +1183,17 @@ int c15_map_build_visible(
         surface_bits_size < (surfaces->count + 7u) / 8u) {
         return 0;
     }
+    if (visible_leaf_bits &&
+        visible_leaf_bits_size < C15_MAP_VISIBILITY_BYTES) {
+        return 0;
+    }
     bda_memset(surface_bits, 0, surface_bits_size);
     bda_memset(leaf_bits, 0, sizeof(leaf_bits));
+    if (visible_leaf_bits) {
+        bda_memset(
+            visible_leaf_bits, 0, visible_leaf_bits_size
+        );
+    }
     visibility_leaves = (uint32_t)read_i32(models->data + 36u);
     row_bytes = (visibility_leaves + 7u) >> 3;
     if (visibility_leaves == 0u ||
@@ -1208,6 +1266,11 @@ int c15_map_build_visible(
         leaves, marks, (uint32_t)leaf_index,
         surface_bits, surface_bits_size
     );
+    if (visible_leaf_bits) {
+        for (output = 0u; output < row_bytes; ++output) {
+            visible_leaf_bits[output] = leaf_bits[output];
+        }
+    }
     if (visible_leaf_count) {
         *visible_leaf_count = 1u;
     }
@@ -1215,6 +1278,9 @@ int c15_map_build_visible(
          leaf <= visibility_leaves && leaf < leaves->count; ++leaf) {
         if ((leaf_bits[(leaf - 1u) >> 3] &
              (uint8_t)(1u << ((leaf - 1u) & 7u))) != 0u) {
+            if (leaf == (uint32_t)leaf_index) {
+                continue;
+            }
             mark_leaf_surfaces(
                 leaves, marks, leaf, surface_bits, surface_bits_size
             );

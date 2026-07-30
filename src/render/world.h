@@ -12,7 +12,9 @@ typedef struct c15_render_stats {
     uint32_t visible_surfaces;
     uint32_t drawn_surfaces;
     uint32_t drawn_triangles;
+    uint32_t tested_pixels;
     uint32_t drawn_pixels;
+    uint32_t clear_ms;
 } c15_render_stats_t;
 
 void c15_render_world(
@@ -23,6 +25,9 @@ void c15_render_world(
     uint8_t *visible_surface_bits,
     uint32_t visible_surface_bytes,
     c15_render_stats_t *stats
+);
+int c15_render_world_point_visible(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
 );
 
 #endif

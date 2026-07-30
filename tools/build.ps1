@@ -68,6 +68,7 @@ $sources = @(
     (Join-Path $projectRoot 'src\core\runtime.c'),
     (Join-Path $projectRoot 'src\assets\pak.c'),
     (Join-Path $projectRoot 'src\audio\sound.c'),
+    (Join-Path $projectRoot 'src\app\damage.c'),
     (Join-Path $projectRoot 'src\model\model.c'),
     (Join-Path $projectRoot 'src\platform\display.c'),
     (Join-Path $projectRoot 'src\platform\bbk9588.c'),
@@ -103,8 +104,19 @@ foreach ($source in $sources) {
     } else {
         @()
     }
+    $hotOptimization = if (
+        $relative -like 'src\render\*' -or
+        $relative -eq 'src\platform\display.c'
+    ) {
+        @('-O2')
+    } else {
+        @()
+    }
     Write-Host "CC $relative"
-    Invoke-Checked $gcc ($common + $language + @('-c', $source, '-o', $object))
+    Invoke-Checked $gcc (
+        $common + $language + $hotOptimization +
+        @('-c', $source, '-o', $object)
+    )
     $objects += $object
 }
 

@@ -2059,6 +2059,83 @@ def compile_dynamic_entities(
     return bytes(output), manifest
 
 
+def pvs_maximum_visible_surfaces(
+    leaves: Sequence[tuple[int, ...]],
+    marksurfaces: Sequence[int],
+    models: Sequence[tuple[float | int, ...]],
+    visibility: bytes,
+) -> tuple[int, int]:
+    """Return the largest unique world-surface PVS and its leaf index."""
+    if not models:
+        return 0, 0
+    visibility_leaves = int(models[0][13])
+    if (
+        visibility_leaves <= 0
+        or visibility_leaves >= len(leaves)
+    ):
+        raise AssetError("world model visibility leaf count is invalid")
+    row_bytes = (visibility_leaves + 7) // 8
+    leaf_surface_masks: list[int] = [0] * len(leaves)
+    all_surface_mask = 0
+    for leaf_index, leaf in enumerate(leaves):
+        first = int(leaf[8])
+        count = int(leaf[9])
+        if first > len(marksurfaces) or count > len(marksurfaces) - first:
+            raise AssetError(f"leaf {leaf_index} marksurface range is invalid")
+        mask = 0
+        for surface in marksurfaces[first:first + count]:
+            mask |= 1 << int(surface)
+        leaf_surface_masks[leaf_index] = mask
+        all_surface_mask |= mask
+
+    maximum = 0
+    maximum_leaf = 0
+    visibility_mask = (1 << visibility_leaves) - 1
+    for leaf_index in range(1, visibility_leaves + 1):
+        visibility_offset = int(leaves[leaf_index][1])
+        if visibility_offset < 0:
+            surface_mask = all_surface_mask
+        else:
+            decoded = bytearray()
+            cursor = visibility_offset
+            while len(decoded) < row_bytes:
+                if cursor >= len(visibility):
+                    raise AssetError(
+                        f"leaf {leaf_index} PVS is truncated"
+                    )
+                value = visibility[cursor]
+                cursor += 1
+                if value:
+                    decoded.append(value)
+                    continue
+                if cursor >= len(visibility):
+                    raise AssetError(
+                        f"leaf {leaf_index} PVS zero run is truncated"
+                    )
+                run = visibility[cursor]
+                cursor += 1
+                if run == 0:
+                    raise AssetError(
+                        f"leaf {leaf_index} PVS has an empty zero run"
+                    )
+                decoded.extend(bytes(run))
+            visible_bits = (
+                int.from_bytes(decoded[:row_bytes], "little")
+                & visibility_mask
+            )
+            surface_mask = leaf_surface_masks[leaf_index]
+            while visible_bits:
+                lowest = visible_bits & -visible_bits
+                visible_leaf = lowest.bit_length()
+                surface_mask |= leaf_surface_masks[visible_leaf]
+                visible_bits ^= lowest
+        visible_surfaces = surface_mask.bit_count()
+        if visible_surfaces > maximum:
+            maximum = visible_surfaces
+            maximum_leaf = leaf_index
+    return maximum, maximum_leaf
+
+
 def compile_bsp(
     bsp: GoldSrcBsp, textures: list[MipTexture], selected_mips: list[int]
 ) -> tuple[bytes, dict[str, object]]:
@@ -2223,6 +2300,12 @@ def compile_bsp(
     dynamic_out, dynamic_manifest = compile_dynamic_entities(
         bsp.lump(LUMP_ENTITIES), model_source
     )
+    maximum_visible_surfaces, maximum_visible_leaf = (
+        pvs_maximum_visible_surfaces(
+            leaf_source, marksurfaces, model_source,
+            bsp.lump(LUMP_VISIBILITY),
+        )
+    )
 
     bounds_values: list[float] = []
     if model_source:
@@ -2245,7 +2328,7 @@ def compile_bsp(
         pack_section(b"MARK", marks_out, len(marksurfaces), 2),
         pack_section(
             b"VISI", bsp.lump(LUMP_VISIBILITY),
-            len(bsp.lump(LUMP_VISIBILITY)), 1, 1
+            len(bsp.lump(LUMP_VISIBILITY)), 1, 0
         ),
         pack_section(b"CLIP", bytes(clips_out), len(clip_source), CLIPNODE.size),
         pack_section(b"MODL", bytes(models_out), len(model_source), MODEL.size),
@@ -2331,6 +2414,9 @@ def compile_bsp(
         "ladders": ladders_manifest,
         "dynamic_entities": dynamic_manifest,
         "visibility_bytes": len(bsp.lump(LUMP_VISIBILITY)),
+        "visibility_resident": True,
+        "maximum_visible_surfaces": maximum_visible_surfaces,
+        "maximum_visible_leaf": maximum_visible_leaf,
         "source_lighting_bytes": len(lighting),
         "chunk_bytes": len(output),
     }
@@ -3137,8 +3223,8 @@ def build_command(args: argparse.Namespace) -> None:
         assets.append(PakAsset(b"SND0", "sound/game", sound_chunk))
         sound_manifest.append(sound_detail)
     assets.append(PakAsset(
-        b"VER0", "meta/m19",
-        b"CS15LITE-M19-CLASSIC-WORLD-AND-PLAYER-TEXTURES\0"
+        b"VER0", "meta/m20",
+        b"CS15LITE-M20-RESIDENT-WORLD-PVS-AND-TEXTURES\0"
     ))
     pack = build_pack(assets)
     validation = validate_pack(pack)
@@ -3148,7 +3234,7 @@ def build_command(args: argparse.Namespace) -> None:
     manifest = {
         "format": "CS15 Lite asset manifest",
         "format_version": 1,
-        "runtime_resource_revision": "M19",
+        "runtime_resource_revision": "M20",
         "world_texture_profile": texture_profile_name,
         "world_texture_compression": bool(args.compress_world_textures),
         "player_texture_profile": player_texture_profile_name,

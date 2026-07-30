@@ -23,6 +23,13 @@ $tests = @(
         )
     },
     @{
+        Name = 'damage_test'
+        Sources = @(
+            (Join-Path $projectRoot 'tests\damage_test.c'),
+            (Join-Path $projectRoot 'src\app\damage.c')
+        )
+    },
+    @{
         Name = 'framebuffer_test'
         Sources = @(
             (Join-Path $projectRoot 'tests\framebuffer_test.c'),
@@ -62,6 +69,15 @@ $tests = @(
         Sources = @(
             (Join-Path $projectRoot 'tests\model_render_test.c'),
             (Join-Path $projectRoot 'src\render\model.c')
+        )
+    },
+    @{
+        Name = 'model_animation_test'
+        Sources = @(
+            (Join-Path $projectRoot 'tests\model_animation_test.c'),
+            (Join-Path $projectRoot 'src\model\model.c'),
+            (Join-Path $projectRoot 'src\assets\pak.c'),
+            (Join-Path $projectRoot 'src\core\memory.c')
         )
     }
 )

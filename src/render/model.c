@@ -9,6 +9,12 @@
 #define MODEL_WORLD_NEAR 8
 #define MODEL_WORLD_DEFAULT_FOCAL ((int)LITE_VIEW_WIDTH / 2)
 #define MODEL_ENTITY_CULL_RADIUS_Q4 (128 * 16)
+#define MODEL_DEPTH_TILE_SHIFT 3
+#define MODEL_DEPTH_TILE_SIZE (1 << MODEL_DEPTH_TILE_SHIFT)
+#define MODEL_DEPTH_TILE_COLUMNS \
+    (LITE_VIEW_WIDTH / MODEL_DEPTH_TILE_SIZE)
+#define MODEL_DEPTH_TILE_ROWS \
+    (LITE_VIEW_HEIGHT / MODEL_DEPTH_TILE_SIZE)
 
 typedef struct model_projected_vertex {
     int16_t x;
@@ -40,10 +46,113 @@ typedef struct model_scan_gradient {
     int32_t dz_dy;
 } model_scan_gradient_t;
 
-typedef uint32_t model_depth_alias_u32 __attribute__((__may_alias__));
-
 static model_projected_vertex_t
     g_projected_vertices[MODEL_MAX_PROJECTED_VERTICES];
+static uint16_t g_view_depth_tile_stamps[
+    MODEL_DEPTH_TILE_COLUMNS * MODEL_DEPTH_TILE_ROWS
+];
+static uint16_t g_view_depth_generation;
+static uint8_t g_view_depth_lazy;
+
+static uint32_t fractional_divide_q16(
+    uint32_t remainder, uint32_t denominator
+)
+{
+    uint32_t result = 0u;
+    uint32_t bit;
+    for (bit = 0u; bit < 16u; ++bit) {
+        result <<= 1;
+        /*
+         * Compare before doubling so remainder never overflows uint32_t.
+         * This is the fractional half of exact restoring division.
+         */
+        if (remainder >= denominator - remainder) {
+            remainder -= denominator - remainder;
+            result |= 1u;
+        } else {
+            remainder += remainder;
+        }
+    }
+    return result;
+}
+
+static int32_t fixed_divide_q16(
+    int64_t numerator, uint32_t denominator
+)
+{
+    int negative;
+    uint32_t magnitude;
+    uint32_t whole;
+    uint32_t remainder;
+    uint32_t result;
+    if (denominator == 0u) {
+        return 0;
+    }
+    if (numerator < -2147483647LL ||
+        numerator > 2147483647LL) {
+        return (int32_t)((numerator * 65536) / denominator);
+    }
+    negative = numerator < 0;
+    magnitude = negative ?
+        (uint32_t)(-numerator) : (uint32_t)numerator;
+    whole = magnitude / denominator;
+    if (whole > 32767u) {
+        return (int32_t)((numerator * 65536) / denominator);
+    }
+    remainder = magnitude - whole * denominator;
+    result = (whole << 16) |
+        fractional_divide_q16(remainder, denominator);
+    return negative ? (int32_t)(0u - result) : (int32_t)result;
+}
+
+static void begin_lazy_view_depth(void)
+{
+    ++g_view_depth_generation;
+    if (g_view_depth_generation == 0u) {
+        bda_memset(
+            g_view_depth_tile_stamps, 0,
+            sizeof(g_view_depth_tile_stamps)
+        );
+        g_view_depth_generation = 1u;
+    }
+    g_view_depth_lazy = 1u;
+}
+
+static void clear_view_depth_span(
+    uint16_t *depth, int y, int x0, int x1
+)
+{
+    uint32_t tile_y = (uint32_t)y >> MODEL_DEPTH_TILE_SHIFT;
+    uint32_t first_tile =
+        (uint32_t)x0 >> MODEL_DEPTH_TILE_SHIFT;
+    uint32_t last_tile =
+        (uint32_t)x1 >> MODEL_DEPTH_TILE_SHIFT;
+    uint32_t tile;
+    for (tile = first_tile; tile <= last_tile; ++tile) {
+        uint32_t stamp_index =
+            tile_y * MODEL_DEPTH_TILE_COLUMNS + tile;
+        uint32_t row;
+        uint32_t tile_x;
+        if (g_view_depth_tile_stamps[stamp_index] ==
+            g_view_depth_generation) {
+            continue;
+        }
+        g_view_depth_tile_stamps[stamp_index] =
+            g_view_depth_generation;
+        tile_x = tile << MODEL_DEPTH_TILE_SHIFT;
+        for (row = tile_y << MODEL_DEPTH_TILE_SHIFT;
+             row < (tile_y + 1u) << MODEL_DEPTH_TILE_SHIFT;
+             ++row) {
+            uint32_t column;
+            uint16_t *target =
+                depth + row * LITE_VIEW_WIDTH + tile_x;
+            for (column = 0u;
+                 column < MODEL_DEPTH_TILE_SIZE; ++column) {
+                target[column] = 0xffffu;
+            }
+        }
+    }
+}
 
 static int16_t read_i16(const uint8_t *data)
 {
@@ -97,8 +206,8 @@ static void model_edge_begin(
     int advance = start_y - start->y;
     edge->x = (int32_t)((int64_t)start->x * 65536);
     if (dy != 0) {
-        edge->dx = (int32_t)(
-            ((int64_t)((int)end->x - start->x) * 65536) / dy
+        edge->dx = fixed_divide_q16(
+            (int64_t)((int)end->x - start->x), (uint32_t)dy
         );
     } else {
         edge->dx = 0;
@@ -121,6 +230,9 @@ static inline __attribute__((always_inline)) int model_wrap_coordinate(
     int negative;
     if (size <= 1u) {
         return 0;
+    }
+    if ((uint32_t)value < size) {
+        return value;
     }
     if (mask != 0u) {
         return value & mask;
@@ -152,6 +264,16 @@ static void draw_model_half(
     int32_t row_u;
     int32_t row_v;
     int32_t row_z;
+    uint32_t drawn_pixels = 0u;
+    const uint8_t *texture_pixels = texture->pixels;
+    const uint16_t *texture_palette = texture->palette;
+    uint16_t texture_width = texture->width;
+    uint16_t width_mask = texture->width_mask;
+    uint16_t height_mask = texture->height_mask;
+    int opaque = (texture->flags & 1u) == 0u;
+    int opaque_power_of_two =
+        opaque &&
+        width_mask != 0u && height_mask != 0u;
     if (y_start < 0) {
         int skip = -y_start;
         first->x += first->dx * skip;
@@ -193,7 +315,6 @@ static void draw_model_half(
             int32_t u = row_u + gradient->du_dx * x0;
             int32_t v = row_v + gradient->dv_dx * x0;
             int32_t z = row_z + gradient->dz_dx * x0;
-            int x;
             uint16_t *frame_row = fb->pixels + y * fb->stride;
             uint16_t *depth_row = depth + y * LITE_VIEW_WIDTH;
             if (x0 < 0) {
@@ -206,28 +327,97 @@ static void draw_model_half(
             if (x1 >= fb->width) {
                 x1 = fb->width - 1;
             }
-            for (x = x0; x <= x1; ++x) {
-                uint32_t depth_value = (uint32_t)(z >> 16);
-                if (depth_value > 0u && depth_value < depth_row[x]) {
-                    int tx = model_wrap_coordinate(
-                        u >> 16, texture->width,
-                        texture->width_mask, texture->width_reciprocal
-                    );
-                    int ty = model_wrap_coordinate(
-                        v >> 16, texture->height,
-                        texture->height_mask, texture->height_reciprocal
-                    );
-                    uint8_t texel =
-                        texture->pixels[ty * texture->width + tx];
-                    if ((texture->flags & 1u) == 0u || texel != 255u) {
-                        depth_row[x] = (uint16_t)depth_value;
-                        frame_row[x] = texture->palette[texel];
-                        ++stats->pixels;
+            if (g_view_depth_lazy && x0 <= x1) {
+                clear_view_depth_span(depth, y, x0, x1);
+            }
+            if (x0 <= x1) {
+                int remaining = x1 - x0 + 1;
+                uint16_t *frame_pixel = frame_row + x0;
+                uint16_t *depth_pixel = depth_row + x0;
+                if (opaque_power_of_two) {
+                    while (remaining-- > 0) {
+                        uint32_t depth_value =
+                            (uint32_t)(z >> 16);
+                        if (depth_value > 0u &&
+                            depth_value < *depth_pixel) {
+                            int tx = (u >> 16) & width_mask;
+                            int ty = (v >> 16) & height_mask;
+                            uint8_t texel = texture_pixels[
+                                ty * texture_width + tx
+                            ];
+                            *depth_pixel = (uint16_t)depth_value;
+                            *frame_pixel = texture_palette[texel];
+                            ++drawn_pixels;
+                        }
+                        ++frame_pixel;
+                        ++depth_pixel;
+                        u += gradient->du_dx;
+                        v += gradient->dv_dx;
+                        z += gradient->dz_dx;
+                    }
+                } else if (opaque) {
+                    while (remaining-- > 0) {
+                        uint32_t depth_value =
+                            (uint32_t)(z >> 16);
+                        if (depth_value > 0u &&
+                            depth_value < *depth_pixel) {
+                            int tx = model_wrap_coordinate(
+                                u >> 16, texture_width,
+                                width_mask,
+                                texture->width_reciprocal
+                            );
+                            int ty = model_wrap_coordinate(
+                                v >> 16, texture->height,
+                                height_mask,
+                                texture->height_reciprocal
+                            );
+                            uint8_t texel = texture_pixels[
+                                ty * texture_width + tx
+                            ];
+                            *depth_pixel = (uint16_t)depth_value;
+                            *frame_pixel = texture_palette[texel];
+                            ++drawn_pixels;
+                        }
+                        ++frame_pixel;
+                        ++depth_pixel;
+                        u += gradient->du_dx;
+                        v += gradient->dv_dx;
+                        z += gradient->dz_dx;
+                    }
+                } else {
+                    while (remaining-- > 0) {
+                        uint32_t depth_value =
+                            (uint32_t)(z >> 16);
+                        if (depth_value > 0u &&
+                            depth_value < *depth_pixel) {
+                            int tx = model_wrap_coordinate(
+                                u >> 16, texture_width,
+                                width_mask,
+                                texture->width_reciprocal
+                            );
+                            int ty = model_wrap_coordinate(
+                                v >> 16, texture->height,
+                                height_mask,
+                                texture->height_reciprocal
+                            );
+                            uint8_t texel = texture_pixels[
+                                ty * texture_width + tx
+                            ];
+                            if (texel != 255u) {
+                                *depth_pixel =
+                                    (uint16_t)depth_value;
+                                *frame_pixel =
+                                    texture_palette[texel];
+                                ++drawn_pixels;
+                            }
+                        }
+                        ++frame_pixel;
+                        ++depth_pixel;
+                        u += gradient->du_dx;
+                        v += gradient->dv_dx;
+                        z += gradient->dz_dx;
                     }
                 }
-                u += gradient->du_dx;
-                v += gradient->dv_dx;
-                z += gradient->dz_dx;
             }
         }
         model_edge_step(first);
@@ -236,6 +426,7 @@ static void draw_model_half(
         row_v += gradient->dv_dy;
         row_z += gradient->dz_dy;
     }
+    stats->pixels += drawn_pixels;
 }
 
 static model_view_vertex_t view_model_vertex(
@@ -263,8 +454,10 @@ static model_view_vertex_t view_model_intersection(
     model_view_vertex_t result;
     int32_t denominator = inside->z - outside->z;
     int32_t fraction = denominator != 0 ?
-        (int32_t)(((int64_t)(inside->z - near) << 16) /
-                  denominator) : 0;
+        fixed_divide_q16(
+            (int64_t)(inside->z - near),
+            (uint32_t)denominator
+        ) : 0;
     result.x = inside->x +
         (int32_t)(((int64_t)(outside->x - inside->x) * fraction) >> 16);
     result.y = inside->y +
@@ -345,37 +538,59 @@ static void draw_model_triangle(
     int dy1;
     int dx2;
     int dy2;
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
     /* Both GoldSrc camera paths use screen-right = -world/model Y. */
     if (area <= 0) {
+        return;
+    }
+    min_x = a->x < b->x ? a->x : b->x;
+    if (c->x < min_x) min_x = c->x;
+    max_x = a->x > b->x ? a->x : b->x;
+    if (c->x > max_x) max_x = c->x;
+    min_y = a->y < b->y ? a->y : b->y;
+    if (c->y < min_y) min_y = c->y;
+    max_y = a->y > b->y ? a->y : b->y;
+    if (c->y > max_y) max_y = c->y;
+    if (max_x < 0 || min_x >= fb->width ||
+        max_y <= 0 || min_y >= fb->height) {
         return;
     }
     dx1 = (int)b->x - a->x;
     dy1 = (int)b->y - a->y;
     dx2 = (int)c->x - a->x;
     dy2 = (int)c->y - a->y;
-    gradient.du_dx = (int32_t)(
-        (((int64_t)((int)b->u - a->u) * dy2 -
-          (int64_t)((int)c->u - a->u) * dy1) * 65536) / area
+    gradient.du_dx = fixed_divide_q16(
+        (int64_t)((int)b->u - a->u) * dy2 -
+            (int64_t)((int)c->u - a->u) * dy1,
+        (uint32_t)area
     );
-    gradient.du_dy = (int32_t)(
-        (((int64_t)dx1 * ((int)c->u - a->u) -
-          (int64_t)dx2 * ((int)b->u - a->u)) * 65536) / area
+    gradient.du_dy = fixed_divide_q16(
+        (int64_t)dx1 * ((int)c->u - a->u) -
+            (int64_t)dx2 * ((int)b->u - a->u),
+        (uint32_t)area
     );
-    gradient.dv_dx = (int32_t)(
-        (((int64_t)((int)b->v - a->v) * dy2 -
-          (int64_t)((int)c->v - a->v) * dy1) * 65536) / area
+    gradient.dv_dx = fixed_divide_q16(
+        (int64_t)((int)b->v - a->v) * dy2 -
+            (int64_t)((int)c->v - a->v) * dy1,
+        (uint32_t)area
     );
-    gradient.dv_dy = (int32_t)(
-        (((int64_t)dx1 * ((int)c->v - a->v) -
-          (int64_t)dx2 * ((int)b->v - a->v)) * 65536) / area
+    gradient.dv_dy = fixed_divide_q16(
+        (int64_t)dx1 * ((int)c->v - a->v) -
+            (int64_t)dx2 * ((int)b->v - a->v),
+        (uint32_t)area
     );
-    gradient.dz_dx = (int32_t)(
-        (((int64_t)((int)b->z - a->z) * dy2 -
-          (int64_t)((int)c->z - a->z) * dy1) * 65536) / area
+    gradient.dz_dx = fixed_divide_q16(
+        (int64_t)((int)b->z - a->z) * dy2 -
+            (int64_t)((int)c->z - a->z) * dy1,
+        (uint32_t)area
     );
-    gradient.dz_dy = (int32_t)(
-        (((int64_t)dx1 * ((int)c->z - a->z) -
-          (int64_t)dx2 * ((int)b->z - a->z)) * 65536) / area
+    gradient.dz_dy = fixed_divide_q16(
+        (int64_t)dx1 * ((int)c->z - a->z) -
+            (int64_t)dx2 * ((int)b->z - a->z),
+        (uint32_t)area
     );
     if (first.y > second.y) {
         temporary = first; first = second; second = temporary;
@@ -410,28 +625,6 @@ static void draw_model_triangle(
     ++stats->triangles;
 }
 
-static void clear_model_depth(uint16_t *depth)
-{
-    model_depth_alias_u32 *words = (model_depth_alias_u32 *)depth;
-    uint32_t remaining =
-        (LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT) / 2u;
-    while (remaining >= 8u) {
-        words[0] = 0xffffffffu;
-        words[1] = 0xffffffffu;
-        words[2] = 0xffffffffu;
-        words[3] = 0xffffffffu;
-        words[4] = 0xffffffffu;
-        words[5] = 0xffffffffu;
-        words[6] = 0xffffffffu;
-        words[7] = 0xffffffffu;
-        words += 8;
-        remaining -= 8u;
-    }
-    while (remaining-- != 0u) {
-        *words++ = 0xffffffffu;
-    }
-}
-
 void c15_render_view_model(
     const c15_model_t *model,
     lite_framebuffer_t *framebuffer,
@@ -449,7 +642,7 @@ void c15_render_view_model(
         return;
     }
     bda_memset(stats, 0, sizeof(*stats));
-    clear_model_depth(depth);
+    begin_lazy_view_depth();
     for (index = 0u; index < model->vertex_count; ++index) {
         const uint8_t *source = model->vertices + index * 8u;
         model_projected_vertex_t *target = &g_projected_vertices[index];
@@ -525,6 +718,7 @@ void c15_render_view_model(
             a, b, c, stats
         );
     }
+    g_view_depth_lazy = 0u;
 }
 
 void c15_render_world_model(

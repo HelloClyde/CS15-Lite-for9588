@@ -37,6 +37,8 @@ typedef struct c15_sound_voice {
 
 typedef struct c15_audio {
     c15_pak_entry_t bank;
+    const uint8_t *resident_bank;
+    uint32_t resident_bytes;
     uint32_t cue_offsets[C15_SOUND_CUE_COUNT];
     uint32_t cue_sizes[C15_SOUND_CUE_COUNT];
     c15_sound_voice_t voices[2];
@@ -55,6 +57,13 @@ int c15_audio_init(
     const c15_pak_t *pak,
     void *scratch,
     uint32_t scratch_size
+);
+uint32_t c15_audio_resident_size(const c15_audio_t *audio);
+int c15_audio_load_resident(
+    c15_audio_t *audio,
+    const c15_pak_t *pak,
+    void *memory,
+    uint32_t memory_size
 );
 void c15_audio_set_enabled(
     c15_audio_t *audio,

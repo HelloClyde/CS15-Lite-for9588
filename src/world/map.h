@@ -11,6 +11,9 @@
 #define C15_MAP_MAX_SECTIONS 24u
 #define C15_MAP_MAX_TEXTURES 256u
 #define C15_MAP_VISIBLE_BYTES 1280u
+#define C15_MAP_MAX_VISIBILITY_LEAVES 4096u
+#define C15_MAP_VISIBILITY_BYTES \
+    (C15_MAP_MAX_VISIBILITY_LEAVES / 8u)
 #define C15_MAP_MAX_DYNAMIC_ENTITIES 32u
 
 typedef struct c15_map_section {
@@ -27,11 +30,13 @@ typedef struct c15_texture {
     uint32_t entry_offset;
     uint32_t entry_size;
     uint32_t resident_bytes;
+    uint32_t runtime_bytes;
     uint16_t width;
     uint16_t height;
     uint16_t flags;
     uint16_t palette_count;
     const uint16_t *palette;
+    const uint16_t *shade_palettes;
     const uint8_t *pixels;
     uint16_t width_mask;
     uint16_t height_mask;
@@ -171,6 +176,8 @@ int c15_map_build_visible(
     const c15_camera_t *camera,
     uint8_t *surface_bits,
     uint32_t surface_bits_size,
+    uint8_t *leaf_bits,
+    uint32_t leaf_bits_size,
     uint32_t *visible_leaf_count
 );
 int c15_map_camera_leaf(

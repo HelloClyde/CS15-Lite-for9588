@@ -84,7 +84,7 @@ Version 3 sections:
 | `NODE` | 8 bytes | BSP plane and two signed child indices |
 | `LEAF` | 12 bytes | Contents, PVS offset and marksurface range |
 | `MARK` | 2 bytes | Surface index referenced by a leaf |
-| `VISI` | byte stream | Original GoldSrc compressed PVS; section flag 1 means streamed |
+| `VISI` | byte stream | Original GoldSrc compressed PVS; M20 stores it resident with flag 0 (flag 1 remains readable for old development packs) |
 | `CLIP` | 8 bytes | Collision plane and two children |
 | `MODL` | 48 bytes | Bounds, origin, hull heads and surface range |
 | `TNAM` | 16 bytes | Texture name in GoldSrc miptex order |

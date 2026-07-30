@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "render/framebuffer.h"
 
+typedef uint32_t framebuffer_alias_u32
+    __attribute__((__may_alias__));
+
 /* 5x7 row bitmaps: digits followed by A-Z. */
 static const uint8_t k_font[36][7] = {
     {14,17,19,21,25,17,14},{4,12,4,4,4,4,14},
@@ -44,7 +47,6 @@ void lite_fb_rect(
     int right;
     int bottom;
     int row;
-    int column;
     if (!fb || !fb->pixels || width <= 0 || height <= 0) {
         return;
     }
@@ -54,9 +56,42 @@ void lite_fb_rect(
     if (y < 0) y = 0;
     if (right > fb->width) right = fb->width;
     if (bottom > fb->height) bottom = fb->height;
+    if (right <= x || bottom <= y) {
+        return;
+    }
     for (row = y; row < bottom; ++row) {
-        for (column = x; column < right; ++column) {
-            fb->pixels[row * fb->stride + column] = color;
+        uint16_t *pixel = fb->pixels + row * fb->stride + x;
+        int remaining = right - x;
+        uint32_t pair =
+            (uint32_t)color | ((uint32_t)color << 16);
+        if ((((uintptr_t)pixel) & 2u) != 0u &&
+            remaining > 0) {
+            *pixel++ = color;
+            --remaining;
+        }
+        {
+            framebuffer_alias_u32 *words =
+                (framebuffer_alias_u32 *)pixel;
+            while (remaining >= 16) {
+                words[0] = pair;
+                words[1] = pair;
+                words[2] = pair;
+                words[3] = pair;
+                words[4] = pair;
+                words[5] = pair;
+                words[6] = pair;
+                words[7] = pair;
+                words += 8;
+                remaining -= 16;
+            }
+            while (remaining >= 2) {
+                *words++ = pair;
+                remaining -= 2;
+            }
+            pixel = (uint16_t *)words;
+        }
+        if (remaining != 0) {
+            *pixel = color;
         }
     }
 }
@@ -130,11 +165,38 @@ void lite_fb_line(
 
 static const uint8_t *glyph(char character)
 {
-    static const uint8_t colon[7] = {0,4,4,0,4,4,0};
-    static const uint8_t dot[7] = {0,0,0,0,0,4,4};
+    static const uint8_t exclamation[7] = {4,4,4,4,4,0,4};
+    static const uint8_t quote[7] = {10,10,10,0,0,0,0};
+    static const uint8_t hash[7] = {10,31,10,10,31,10,0};
+    static const uint8_t dollar[7] = {4,15,20,14,5,30,4};
+    static const uint8_t percent[7] = {17,2,4,8,17,0,0};
+    static const uint8_t ampersand[7] = {12,18,20,8,21,18,13};
+    static const uint8_t apostrophe[7] = {4,4,8,0,0,0,0};
+    static const uint8_t left_parenthesis[7] = {2,4,8,8,8,4,2};
+    static const uint8_t right_parenthesis[7] = {8,4,2,2,2,4,8};
+    static const uint8_t asterisk[7] = {0,21,14,31,14,21,0};
+    static const uint8_t plus[7] = {0,4,4,31,4,4,0};
+    static const uint8_t comma[7] = {0,0,0,0,0,4,8};
     static const uint8_t dash[7] = {0,0,0,31,0,0,0};
+    static const uint8_t dot[7] = {0,0,0,0,0,4,4};
     static const uint8_t slash[7] = {1,2,2,4,8,8,16};
+    static const uint8_t colon[7] = {0,4,4,0,4,4,0};
+    static const uint8_t semicolon[7] = {0,4,4,0,4,4,8};
+    static const uint8_t less[7] = {2,4,8,16,8,4,2};
+    static const uint8_t equal[7] = {0,31,0,31,0,0,0};
+    static const uint8_t greater[7] = {16,8,4,2,4,8,16};
     static const uint8_t question[7] = {14,17,1,2,4,0,4};
+    static const uint8_t at[7] = {14,17,23,21,23,16,14};
+    static const uint8_t left_bracket[7] = {14,8,8,8,8,8,14};
+    static const uint8_t backslash[7] = {16,8,8,4,2,2,1};
+    static const uint8_t right_bracket[7] = {14,2,2,2,2,2,14};
+    static const uint8_t caret[7] = {4,10,17,0,0,0,0};
+    static const uint8_t underscore[7] = {0,0,0,0,0,0,31};
+    static const uint8_t backtick[7] = {8,4,2,0,0,0,0};
+    static const uint8_t left_brace[7] = {2,4,4,8,4,4,2};
+    static const uint8_t pipe[7] = {4,4,4,4,4,4,4};
+    static const uint8_t right_brace[7] = {8,4,4,2,4,4,8};
+    static const uint8_t tilde[7] = {0,0,9,22,0,0,0};
     if (character >= '0' && character <= '9') {
         return k_font[(uint32_t)(character - '0')];
     }
@@ -144,11 +206,41 @@ static const uint8_t *glyph(char character)
     if (character >= 'A' && character <= 'Z') {
         return k_font[10u + (uint32_t)(character - 'A')];
     }
-    if (character == ':') return colon;
-    if (character == '.') return dot;
-    if (character == '-') return dash;
-    if (character == '/') return slash;
-    return question;
+    switch (character) {
+        case '!': return exclamation;
+        case '"': return quote;
+        case '#': return hash;
+        case '$': return dollar;
+        case '%': return percent;
+        case '&': return ampersand;
+        case '\'': return apostrophe;
+        case '(': return left_parenthesis;
+        case ')': return right_parenthesis;
+        case '*': return asterisk;
+        case '+': return plus;
+        case ',': return comma;
+        case '-': return dash;
+        case '.': return dot;
+        case '/': return slash;
+        case ':': return colon;
+        case ';': return semicolon;
+        case '<': return less;
+        case '=': return equal;
+        case '>': return greater;
+        case '?': return question;
+        case '@': return at;
+        case '[': return left_bracket;
+        case '\\': return backslash;
+        case ']': return right_bracket;
+        case '^': return caret;
+        case '_': return underscore;
+        case '`': return backtick;
+        case '{': return left_brace;
+        case '|': return pipe;
+        case '}': return right_brace;
+        case '~': return tilde;
+        default: return question;
+    }
 }
 
 static void draw_glyph(

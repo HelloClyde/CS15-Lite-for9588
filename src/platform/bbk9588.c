@@ -13,7 +13,7 @@
 
 #define CLOSE_PUMP_LIMIT 128u
 #define ESCAPE_HOLD_TICKS 32u
-#define RAW_EVENT_MAX_PER_PUMP 8u
+#define RAW_EVENT_MAX_PER_PUMP 64u
 #define RAW_SCREEN_WIDTH 240u
 #define RAW_SCREEN_HEIGHT 320u
 #define C200_GUI_SCREEN_BUFFER 0x6b0u
@@ -40,6 +40,7 @@ static int g_touch_y;
 static int g_touch_dx_pending;
 static int g_touch_dy_pending;
 static int g_touch_down;
+static int g_touch_motion_applied;
 static int g_suppress_touch_escape;
 static int g_escape_down;
 static int g_exit_requested;
@@ -260,7 +261,9 @@ static void touch_debug_move(int x, int y, int dx, int dy)
     g_touch_debug_last_event_ms = now;
 }
 
-static void touch_debug_release(int x, int y, int dx, int dy)
+static void touch_debug_release(
+    int x, int y, int dx, int dy, int delta_applied
+)
 {
     uint32_t now;
     if (!g_touch_debug_active) {
@@ -268,7 +271,11 @@ static void touch_debug_release(int x, int y, int dx, int dy)
     }
     now = touch_debug_now();
     touch_debug_gap(now - g_touch_debug_last_event_ms);
-    touch_debug_delta(dx, dy);
+    if (delta_applied) {
+        touch_debug_delta(dx, dy);
+    } else if (dx != 0 || dy != 0) {
+        g_touch_debug_current.release_delta_suppressed = 1u;
+    }
     g_touch_debug_current.release_dx = dx;
     g_touch_debug_current.release_dy = dy;
     g_touch_debug_current.end_x = x;
@@ -308,6 +315,7 @@ static void update_touch_position(void)
     }
     if (!g_touch_down) {
         g_touch_down = 1;
+        g_touch_motion_applied = 0;
         g_suppress_touch_escape = 1;
         g_touch_control = hit_test(x, y);
         if (g_touch_control == LITE_INPUT_LOOK_ZONE) {
@@ -320,6 +328,9 @@ static void update_touch_position(void)
         int dy = y - g_touch_y;
         g_touch_dx_pending += dx;
         g_touch_dy_pending += dy;
+        if (dx != 0 || dy != 0) {
+            g_touch_motion_applied = 1;
+        }
         touch_debug_move(x, y, dx, dy);
     }
     g_touch_x = x;
@@ -331,29 +342,44 @@ static void release_touch_position(void)
     int x = g_touch_x;
     int y = g_touch_y;
     int valid = latest_touch_position(&x, &y);
+    int dx = 0;
+    int dy = 0;
+    int apply_delta = 0;
 
     if (!g_touch_down) {
         return;
     }
     if (g_touch_control == LITE_INPUT_LOOK_ZONE) {
-        int dx = 0;
-        int dy = 0;
         if (valid) {
             dx = x - g_touch_x;
             dy = y - g_touch_y;
-            g_touch_dx_pending += dx;
-            g_touch_dy_pending += dy;
-            g_touch_x = x;
-            g_touch_y = y;
+            /*
+             * Real 9588 firmware normally publishes MOVE coordinates before
+             * TOUCH_UP, but its cached coordinate may jump back to an older
+             * sample as the pen is released. Applying that stale final delta
+             * makes the camera visibly snap backwards. Keep the release-only
+             * fallback for emulator/firmware paths that emitted no usable
+             * motion, and otherwise trust the last MOVE coordinate.
+             */
+            if (!g_touch_motion_applied) {
+                g_touch_dx_pending += dx;
+                g_touch_dy_pending += dy;
+                g_touch_x = x;
+                g_touch_y = y;
+                apply_delta = 1;
+            }
         } else {
             ++g_touch_debug_current.invalid_events;
         }
-        touch_debug_release(g_touch_x, g_touch_y, dx, dy);
+        touch_debug_release(
+            g_touch_x, g_touch_y, dx, dy, apply_delta
+        );
     } else if (valid) {
         g_touch_x = x;
         g_touch_y = y;
     }
     g_touch_down = 0;
+    g_touch_motion_applied = 0;
     g_touch_control = 0u;
 }
 
@@ -433,10 +459,6 @@ static uint32_t hit_test(int x, int y)
             y < LITE_BUTTON_CROUCH_Y + LITE_BUTTON_HEIGHT) {
             return LITE_INPUT_MENU;
         }
-        if (y >= LITE_BUTTON_SCORE_Y &&
-            y < LITE_BUTTON_SCORE_Y + LITE_BUTTON_HEIGHT) {
-            return LITE_INPUT_SCORE;
-        }
         if (y >= LITE_BUTTON_ALT_Y &&
             y < LITE_BUTTON_ALT_Y + LITE_BUTTON_HEIGHT) {
             return LITE_INPUT_ALT;
@@ -488,6 +510,7 @@ static uint32_t physical_input(void)
         if (!g_escape_down) {
             g_escape_down = 1;
             g_escape_start_tick = now;
+            mask |= LITE_INPUT_PAUSE;
         } else if (bda_gui_tick_elapsed_25ms(
                        g_escape_start_tick, now) >= ESCAPE_HOLD_TICKS) {
             g_exit_requested = 1;
@@ -519,6 +542,7 @@ int lite_platform_open(void)
     g_touch_y = 0;
     g_touch_dx_pending = 0;
     g_touch_dy_pending = 0;
+    g_touch_motion_applied = 0;
     g_touch_down = 0;
     g_suppress_touch_escape = 0;
     g_escape_down = 0;
@@ -563,15 +587,16 @@ int lite_platform_pump(lite_input_t *input)
     uint32_t down;
     uint32_t events_pumped = 0u;
     uint32_t now;
-    int move_pending = 0;
 
     if (!input || !g_frame || g_detached || g_exit_requested) {
         return 0;
     }
     /*
-     * Match the proven GBA frontend: the runtime owns the raw input stream,
-     * consumes a bounded batch, and reads only the latest coordinate for a
-     * group of MOVE events. The window pump is reserved for final detach.
+     * The runtime owns the raw input stream. Drain a large bounded batch so a
+     * TOUCH_UP cannot sit behind stale MOVE notifications, and apply only the
+     * latest absolute coordinate. While held, poll that coordinate every
+     * application pump even if firmware has not delivered another MOVE yet.
+     * The window pump is reserved for final detach.
      */
     while (events_pumped < RAW_EVENT_MAX_PER_PUMP) {
         if (bda_gui_raw_event_fetch(&event) < 0) {
@@ -585,14 +610,18 @@ int lite_platform_pump(lite_input_t *input)
                 } else if (g_touch_debug_active) {
                     ++g_touch_debug_current.raw_ignored_events;
                 }
-                move_pending = 0;
                 break;
             case BDA_INPUT_EVENT_TOUCH_MOVE:
                 if (g_touch_down) {
-                    move_pending = 1;
                     if (g_touch_debug_active) {
                         ++g_touch_debug_current.move_events;
                     }
+                    /*
+                     * Sample before fetching a possible TOUCH_UP: some 9588
+                     * firmware revisions replace the cached pen coordinate
+                     * with an older value when UP is dequeued.
+                     */
+                    update_touch_position();
                 } else if (g_touch_debug_active) {
                     ++g_touch_debug_current.raw_ignored_events;
                 }
@@ -600,7 +629,6 @@ int lite_platform_pump(lite_input_t *input)
             case BDA_INPUT_EVENT_TOUCH_UP:
                 if (g_touch_down) {
                     release_touch_position();
-                    move_pending = 0;
                 } else if (g_touch_debug_active) {
                     ++g_touch_debug_current.raw_ignored_events;
                 }
@@ -612,7 +640,7 @@ int lite_platform_pump(lite_input_t *input)
                 break;
         }
     }
-    if (move_pending && g_touch_down) {
+    if (g_touch_down) {
         update_touch_position();
     }
     if (events_pumped == RAW_EVENT_MAX_PER_PUMP &&

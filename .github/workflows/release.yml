@@ -92,17 +92,25 @@ jobs:
             -Cstrike 'build/source-assets/cstrike' `
             -Valve 'build/source-assets/valve'
 
-      - name: Verify classic world and player texture profiles
+      - name: Verify resident world and classic texture profiles
         shell: pwsh
         run: |
           $manifest = Get-Content `
             'build/assets/CS15.manifest.json' -Raw | ConvertFrom-Json
-          if ($manifest.runtime_resource_revision -ne 'M19' -or
+          if ($manifest.runtime_resource_revision -ne 'M20' -or
               $manifest.world_texture_profile -ne 'classic' -or
               $manifest.world_texture_compression -or
               $manifest.player_texture_profile -ne 'classic' -or
               $manifest.player_texture_compression) {
-            throw 'Release pack did not use the M19 classic texture profiles'
+            throw 'Release pack did not use the M20 resident/classic profile'
+          }
+          foreach ($map in $manifest.maps) {
+            if (-not $map.visibility_resident) {
+              throw "Map PVS is not resident: $($map.name)"
+            }
+            if ($map.maximum_visible_surfaces -gt 10240) {
+              throw "Map exceeds renderer PVS capacity: $($map.name)"
+            }
           }
           $iceworld = $manifest.maps |
             Where-Object name -eq 'fy_iceworld'
@@ -169,10 +177,11 @@ jobs:
 
           This workflow downloads the authorized original cstrike archive
           from $($env:CS15_SOURCE_RELEASE), verifies its SHA-256, preprocesses
-          maps/models/textures/animation/audio, verifies the M19 v0.1.3-style
-          64-pixel/256-colour world texture profile and 64-pixel historical
-          player skins, rejects missing WAD textures, and publishes the
-          matching CS15.C15PAK with the BDA and ready-to-copy 9588 install ZIP.
+          maps/models/textures/animation/audio, verifies the M20 resident PVS
+          and world-texture layout, the v0.1.3-style 64-pixel/256-colour world
+          texture profile and 64-pixel historical player skins, rejects
+          missing WAD textures, and publishes the matching CS15.C15PAK with
+          the BDA and ready-to-copy 9588 install ZIP.
 
           Do not make the repository or these release assets public.
           "@

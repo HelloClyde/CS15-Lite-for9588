@@ -16,6 +16,19 @@ SPEC.loader.exec_module(assetc)
 
 
 class AssetFormatTests(unittest.TestCase):
+    def test_pvs_peak_counts_unique_visible_surfaces(self):
+        leaves = [
+            (0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0),
+            (0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0),
+        ]
+        model = tuple([0.0] * 13 + [2, 0, 2])
+        maximum, leaf = assetc.pvs_maximum_visible_surfaces(
+            leaves, [0, 1], [model], bytes((0b10, 0b01))
+        )
+        self.assertEqual(maximum, 2)
+        self.assertEqual(leaf, 1)
+
     def test_texture_and_pack_roundtrip(self):
         width = 4
         height = 4

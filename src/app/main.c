@@ -3,6 +3,7 @@
 #include "bda_memory.h"
 
 #include "assets/pak.h"
+#include "app/damage.h"
 #include "audio/sound.h"
 #include "core/log.h"
 #include "core/memory.h"
@@ -18,16 +19,30 @@
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\CS15LITE\\CS15.C15PAK"
 /* The historical 320x240 RGB565 menu splash occupies 153600 bytes. */
 #define MENU_TEXTURE_ARENA_BYTES 160000u
-#define MAP_WORKING_SET_LIMIT_BYTES (2u * 1024u * 1024u)
+/*
+ * True-device probing found a safe 10.8125 MiB contiguous allocation and
+ * 11.0625 MiB simultaneously held firmware heap. Keep a conservative 4 MiB
+ * guard while making the selected map's geometry, PVS and textures resident.
+ */
+#define MAP_WORKING_SET_LIMIT_BYTES (4u * 1024u * 1024u)
+#define AUDIO_READY_RETRY_MS 2u
 /*
  * The two shared team skins retain a 64-pixel authored mip. A 96 KiB arena
  * leaves room for them, both held weapons and the largest animated view model
  * without runtime texture conversion or per-frame model streaming.
  */
 #define MODEL_ARENA_BYTES (96u * 1024u)
+/*
+ * Four shared world locomotion chunks use about 57 KiB and the largest
+ * current view animation uses about 211 KiB. Keep both resident so changing
+ * an animation frame never seeks the FAT resource pack during play.
+ */
+#define ANIMATION_ARENA_BYTES (320u * 1024u)
+#define VIEW_CACHE_ARENA_BYTES (4u * 1024u * 1024u)
 #define LOAD_SCRATCH_BYTES 2048u
 #define FRAME_INTERVAL_MS 40u
 #define LOGIC_INTERVAL_MS 40u
+#define LOGIC_MAX_CATCHUP_STEPS 2u
 #define METRIC_INTERVAL_MS 5000u
 #define FIRE_FEEDBACK_MS 160u
 #define HIT_FEEDBACK_MS 140u
@@ -69,8 +84,10 @@ enum game_screen {
     SCREEN_MAP,
     SCREEN_TEAM,
     SCREEN_BUY,
+    SCREEN_BUY_ITEMS,
     SCREEN_PLAY,
-    SCREEN_ROUND_END
+    SCREEN_ROUND_END,
+    SCREEN_PAUSE
 };
 
 enum bot_difficulty {
@@ -152,10 +169,24 @@ enum buy_item {
     BUY_ITEM_COUNT
 };
 
+enum buy_category {
+    BUY_CATEGORY_PISTOLS,
+    BUY_CATEGORY_SHOTGUNS,
+    BUY_CATEGORY_SMGS,
+    BUY_CATEGORY_RIFLES,
+    BUY_CATEGORY_MACHINE_GUN,
+    BUY_CATEGORY_EQUIPMENT,
+    BUY_CATEGORY_COUNT
+};
+
+#define BUY_CATEGORY_MAX_ITEMS 8u
+#define BUY_ACTION_BACK BUY_ITEM_COUNT
+
 typedef struct c15_bot {
     c15_player_t mover;
     uint32_t next_fire;
     uint32_t next_decision;
+    uint32_t next_visibility_check;
     uint32_t flash_until;
     uint32_t last_enemy_seen;
     int32_t last_enemy_x;
@@ -169,6 +200,8 @@ typedef struct c15_bot {
     uint8_t weapon;
     uint8_t alive;
     uint8_t target_visible_last;
+    uint8_t visibility_cached;
+    uint8_t visibility_target;
     uint8_t stuck_turn;
     uint8_t nav_index;
     uint8_t nav_stalls;
@@ -319,32 +352,28 @@ static const char *const g_map_loading[MAP_COUNT] = {
 };
 
 /*
- * BSP visibility stays streamed from the pack. Only resident sections are
- * allocated, and only for the selected map, so small maps do not pay the
- * 1.08 MiB Office peak. Values include section-alignment headroom.
+ * All BSP sections, including PVS visibility, stay resident for the selected
+ * map. This removes mid-round FAT seeks and still keeps the largest map
+ * allocation (Office) around 1.3 MiB.
  */
 static const uint32_t g_map_arena_bytes[MAP_COUNT] = {
-    620000u, 36000u, 360000u, 880000u, 800000u, 848000u, 1088000u
+    720000u, 40000u, 400000u, 1100000u,
+    960000u, 1020000u, 1300000u
 };
 
 /*
- * Runtime texture storage is allocated only after a map is selected.
- * Dust2 and Iceworld fit their original textures eagerly. Larger maps use
- * front-facing PVS prefetch plus demand paging. Geometry + the bounded cache
- * stay below a 2 MiB working-set ceiling even with texture compression off.
+ * Runtime texture storage is allocated only after a map is selected. Every
+ * historical 64-pixel/256-colour map texture is loaded up front; the largest
+ * complete set is about 520 KiB, well inside these existing safety arenas.
  */
 static const uint32_t g_texture_arena_bytes[MAP_COUNT] = {
     1100000u, 155648u, 1300000u, 1200000u,
     1280000u, 1240000u, 1000000u
 };
 
-/*
- * Large maps retain prefetched materials until the cache fills, then page in
- * only textures that reach the rasterizer. Geometry remains resident for
- * collision and raster speed.
- */
+/* No release map performs texture paging during play. */
 static const uint8_t g_map_texture_streaming[MAP_COUNT] = {
-    0u, 0u, 1u, 1u, 1u, 1u, 1u
+    0u, 0u, 0u, 0u, 0u, 0u, 0u
 };
 
 /*
@@ -522,6 +551,8 @@ static uint16_t g_screen[LITE_SCREEN_WIDTH * LITE_SCREEN_HEIGHT];
 static uint16_t g_depth[LITE_VIEW_WIDTH * LITE_VIEW_HEIGHT]
     __attribute__((aligned(4)));
 static uint8_t g_model_memory[MODEL_ARENA_BYTES];
+static uint8_t g_animation_memory[ANIMATION_ARENA_BYTES]
+    __attribute__((aligned(16)));
 static uint8_t g_load_scratch[LOAD_SCRATCH_BYTES]
     __attribute__((aligned(4)));
 static uint8_t g_visible_surfaces[C15_MAP_VISIBLE_BYTES];
@@ -529,6 +560,8 @@ static c15_pak_t g_pak;
 static c15_map_t g_map;
 static c15_model_t g_view_model;
 static c15_model_animation_t g_view_animation;
+static c15_model_t g_view_models[WEAPON_COUNT];
+static c15_model_animation_t g_view_animations[WEAPON_COUNT];
 static c15_model_t g_t_model;
 static c15_model_t g_ct_model;
 static c15_model_t g_t_weapon_model;
@@ -537,7 +570,11 @@ static c15_model_animation_t g_t_locomotion;
 static c15_model_animation_t g_ct_locomotion;
 static c15_model_animation_t g_t_weapon_locomotion;
 static c15_model_animation_t g_ct_weapon_locomotion;
+static lite_arena_t g_animation_arena;
+static size_t g_persistent_animation_bytes;
 static c15_muzzle_sprite_t g_muzzle;
+static c15_muzzle_sprite_t g_muzzle_sprites[WEAPON_COUNT];
+static int g_view_cache_loaded;
 static const uint16_t *g_menu_background;
 
 static const char *const g_weapon_assets[WEAPON_COUNT] = {
@@ -681,7 +718,7 @@ static int resource_pack_is_current(uint32_t map_id)
     };
     uint32_t index;
     int complete = resource_pack_has(
-        "meta/m19", C15_FOURCC('V','E','R','0')
+        "meta/m20", C15_FOURCC('V','E','R','0')
     );
     if (!resource_pack_has(
             "sound/game", C15_FOURCC('S','N','D','0'))) {
@@ -742,8 +779,8 @@ static const uint16_t g_weapon_interval_ms[WEAPON_COUNT] = {
 };
 
 static const uint8_t g_weapon_damage[WEAPON_COUNT] = {
-    50u, 25u, 30u, 32u, 54u, 26u, 25u, 26u, 20u, 29u, 23u,
-    26u, 30u, 25u, 36u, 34u, 33u, 32u, 75u, 100u, 60u, 65u,
+    50u, 25u, 34u, 32u, 54u, 36u, 20u, 20u, 20u, 29u, 20u,
+    26u, 30u, 21u, 36u, 33u, 32u, 32u, 75u, 115u, 80u, 70u,
     32u
 };
 
@@ -765,6 +802,51 @@ static const uint16_t g_equipment_price[
 ] = {
     300u, 200u, 300u, 650u, 1000u, 200u, 300u, 0u
 };
+
+static const char *const g_buy_category_labels[BUY_CATEGORY_COUNT] = {
+    "PISTOLS",
+    "SHOTGUNS",
+    "SUBMACHINE GUNS",
+    "RIFLES",
+    "MACHINE GUN",
+    "EQUIPMENT"
+};
+
+static const uint8_t g_buy_category_item_count[BUY_CATEGORY_COUNT] = {
+    6u, 2u, 5u, 8u, 1u, 7u
+};
+
+static const uint8_t g_buy_category_items[
+    BUY_CATEGORY_COUNT
+][BUY_CATEGORY_MAX_ITEMS] = {
+    {
+        WEAPON_GLOCK, WEAPON_USP, WEAPON_P228, WEAPON_DEAGLE,
+        WEAPON_ELITE, WEAPON_FIVESEVEN
+    },
+    {WEAPON_M3, WEAPON_XM1014},
+    {
+        WEAPON_MAC10, WEAPON_TMP, WEAPON_MP5, WEAPON_UMP45,
+        WEAPON_P90
+    },
+    {
+        WEAPON_AK47, WEAPON_SG552, WEAPON_M4A1, WEAPON_AUG,
+        WEAPON_SCOUT, WEAPON_AWP, WEAPON_G3SG1, WEAPON_SG550
+    },
+    {WEAPON_M249},
+    {
+        BUY_ITEM_HE, BUY_ITEM_FLASH, BUY_ITEM_SMOKE, BUY_ITEM_ARMOR,
+        BUY_ITEM_HELMET, BUY_ITEM_DEFUSE, BUY_ITEM_AMMO
+    }
+};
+
+static uint32_t buy_category_item(uint32_t category, uint32_t index)
+{
+    if (category >= BUY_CATEGORY_COUNT ||
+        index >= g_buy_category_item_count[category]) {
+        return 0xffffffffu;
+    }
+    return g_buy_category_items[category][index];
+}
 
 static uint32_t equipment_price(
     uint32_t item, uint16_t player_armor
@@ -874,10 +956,42 @@ static const uint8_t g_weapon_penetration[WEAPON_COUNT] = {
 
 /* Damage retained for every 500 map units. */
 static const uint16_t g_weapon_range_modifier_q8[WEAPON_COUNT] = {
-    256u, 244u, 245u, 240u, 244u, 242u, 240u, 225u, 228u,
-    238u, 236u, 240u, 240u, 238u, 248u, 246u, 248u, 248u,
-    250u, 252u, 246u, 246u, 238u
+    256u, 192u, 202u, 205u, 207u, 192u, 227u, 256u, 256u,
+    210u, 218u, 215u, 210u, 227u, 251u, 244u, 248u, 246u,
+    251u, 253u, 251u, 251u, 248u
 };
+
+/*
+ * GoldSrc starts at a 0.5 health-damage ratio through Kevlar, then applies
+ * a weapon-specific multiplier. These Q8 values preserve classic behavior:
+ * AWP and AK torso/head hits are not flattened by a generic 40% reduction.
+ */
+static const uint16_t g_weapon_armor_ratio_q8[WEAPON_COUNT] = {
+    218u, 134u, 128u, 160u, 192u, 134u, 192u, 128u, 128u,
+    122u, 128u, 128u, 128u, 192u, 198u, 179u, 179u, 179u,
+    218u, 250u, 211u, 186u, 192u
+};
+
+static uint32_t weapon_base_damage(uint32_t weapon, int silenced)
+{
+    if (weapon == WEAPON_USP && silenced) {
+        return 30u;
+    }
+    if (weapon == WEAPON_M4A1 && silenced) {
+        return 33u;
+    }
+    return g_weapon_damage[weapon];
+}
+
+static uint16_t weapon_range_modifier_q8(
+    uint32_t weapon, int silenced
+)
+{
+    if (weapon == WEAPON_M4A1 && silenced) {
+        return 243u;
+    }
+    return g_weapon_range_modifier_q8[weapon];
+}
 
 static const c15_model_view_t g_weapon_views[WEAPON_COUNT] = {
     {160, 120, 160, 0, 80},
@@ -916,6 +1030,48 @@ typedef struct c15_world_animation_state {
     uint8_t frame;
 } c15_world_animation_state_t;
 
+typedef struct c15_timing_accumulator {
+    uint32_t total_ms;
+    uint32_t maximum_ms;
+    uint32_t samples;
+} c15_timing_accumulator_t;
+
+typedef struct c15_render_frame_timing {
+    uint32_t world_ms;
+    uint32_t world_clear_ms;
+    uint32_t entities_ms;
+    uint32_t view_ms;
+    uint32_t hud_ms;
+    uint32_t entity_pvs_culled;
+} c15_render_frame_timing_t;
+
+static void timing_add(
+    c15_timing_accumulator_t *timing, uint32_t elapsed_ms
+)
+{
+    timing->total_ms += elapsed_ms;
+    if (elapsed_ms > timing->maximum_ms) {
+        timing->maximum_ms = elapsed_ms;
+    }
+    ++timing->samples;
+}
+
+static uint32_t timing_average_x10(
+    const c15_timing_accumulator_t *timing
+)
+{
+    if (timing->samples == 0u) {
+        return 0u;
+    }
+    return (timing->total_ms * 10u + timing->samples / 2u) /
+        timing->samples;
+}
+
+static void timing_reset(c15_timing_accumulator_t *timing)
+{
+    bda_memset(timing, 0, sizeof(*timing));
+}
+
 static int time_reached(uint32_t now, uint32_t deadline)
 {
     return (int32_t)(now - deadline) >= 0;
@@ -924,6 +1080,43 @@ static int time_reached(uint32_t now, uint32_t deadline)
 static int time_active(uint32_t now, uint32_t deadline)
 {
     return (int32_t)(deadline - now) > 0;
+}
+
+static void service_audio_throttled(
+    c15_audio_t *audio,
+    const c15_pak_t *pak,
+    void *scratch,
+    uint32_t scratch_size,
+    uint32_t now,
+    uint32_t *next_service,
+    uint32_t *pending_ms
+)
+{
+    uint32_t started;
+    int result;
+    if (!time_reached(now, *next_service)) {
+        return;
+    }
+    started = lite_platform_milliseconds();
+    result = c15_audio_service(
+        audio, pak, scratch, scratch_size
+    );
+    *pending_ms += lite_platform_milliseconds() - started;
+    /*
+     * A successful write may leave another firmware queue slot available,
+     * so permit the second service point in this loop to fill it. When the
+     * queue is not ready, avoid polling it thousands of times in the same
+     * millisecond; two milliseconds is still far below a 1024-byte block's
+     * roughly 23 ms playback duration.
+     */
+    *next_service = result > 0 ? now : now + AUDIO_READY_RETRY_MS;
+}
+
+static void pause_shift_timestamp(uint32_t *timestamp, uint32_t elapsed)
+{
+    if (timestamp && *timestamp != 0u) {
+        *timestamp += elapsed;
+    }
 }
 
 static int bytes_equal(
@@ -1063,11 +1256,6 @@ static void draw_controls(
         fb, LITE_BUTTON_X, LITE_BUTTON_CROUCH_Y,
         LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "CROUCH",
         (input->down & LITE_INPUT_MENU) != 0u
-    );
-    draw_button(
-        fb, LITE_BUTTON_X, LITE_BUTTON_SCORE_Y,
-        LITE_BUTTON_WIDTH, LITE_BUTTON_HEIGHT, "SCORE",
-        (input->down & LITE_INPUT_SCORE) != 0u
     );
     draw_button(
         fb, LITE_BUTTON_X, LITE_BUTTON_ALT_Y,
@@ -1262,25 +1450,51 @@ static void draw_loading(
     lite_fb_text(fb, 38, 132, line, 1, white);
 }
 
-static uint32_t buy_window_start(uint32_t selection)
+static uint32_t buy_item_window_start(
+    uint32_t selection, uint32_t total
+)
 {
-    /*
-     * START ROUND is a fixed action in the lower-right corner, not an item
-     * in the scrolling catalogue. Keep navigation limited to purchasable
-     * weapons and equipment.
-     */
-    uint32_t total = BUY_ITEM_START;
-    uint32_t start = selection > 2u ? selection - 2u : 0u;
-    if (start + 5u > total) {
-        start = total - 5u;
+    uint32_t start = selection > 1u ? selection - 1u : 0u;
+    if (total <= 4u) {
+        return 0u;
+    }
+    if (start + 4u > total) {
+        start = total - 4u;
     }
     return start;
 }
 
-static void draw_buy_menu(
+static void draw_buy_category_menu(
+    lite_framebuffer_t *fb,
+    uint32_t money,
+    uint32_t selection
+)
+{
+    uint16_t pale = lite_rgb565(211u, 214u, 190u);
+    uint16_t gold = lite_rgb565(224u, 168u, 54u);
+    uint32_t row;
+    draw_menu_chrome(fb, "BUY MENU - SELECT CATEGORY");
+    lite_fb_text(fb, 28, 70, "MONEY", 1, pale);
+    lite_fb_u32(fb, 68, 70, money, 1, gold);
+    for (row = 0u; row < BUY_CATEGORY_COUNT; ++row) {
+        int y = 84 + (int)row * 20;
+        draw_button(
+            fb, 28, y, 190, 18, g_buy_category_labels[row],
+            selection == row
+        );
+        lite_fb_u32(
+            fb, 226, y + 6, g_buy_category_item_count[row], 1,
+            row == selection ? gold : pale
+        );
+    }
+    draw_button(fb, 232, 205, 82, 27, "START ROUND", 0);
+}
+
+static void draw_buy_item_menu(
     lite_framebuffer_t *fb,
     uint32_t money,
     uint32_t selection,
+    uint32_t category,
     const uint8_t owned[WEAPON_COUNT],
     uint8_t player_team,
     uint16_t player_armor
@@ -1288,18 +1502,24 @@ static void draw_buy_menu(
 {
     uint16_t pale = lite_rgb565(211u, 214u, 190u);
     uint16_t gold = lite_rgb565(224u, 168u, 54u);
-    uint32_t start = buy_window_start(selection);
+    uint32_t total = category < BUY_CATEGORY_COUNT ?
+        g_buy_category_item_count[category] : 0u;
+    uint32_t start = buy_item_window_start(selection, total);
     uint32_t row;
-    draw_menu_chrome(fb, "BUY WEAPONS");
-    lite_fb_text(fb, 30, 74, "MONEY", 1, pale);
-    lite_fb_u32(fb, 72, 74, money, 1, gold);
-    for (row = 0u; row < 5u; ++row) {
-        uint32_t item = start + row;
+    draw_menu_chrome(fb, "BUY MENU - SELECT ITEM");
+    if (category < BUY_CATEGORY_COUNT) {
+        lite_fb_text(fb, 28, 70, g_buy_category_labels[category], 1, gold);
+    }
+    lite_fb_text(fb, 188, 70, "MONEY", 1, pale);
+    lite_fb_u32(fb, 230, 70, money, 1, gold);
+    for (row = 0u; row < 4u && start + row < total; ++row) {
+        uint32_t category_index = start + row;
+        uint32_t item = buy_category_item(category, category_index);
         int y = 88 + (int)row * 27;
         if (item < WEAPON_COUNT) {
             draw_button(
                 fb, 28, y, 158, 23, g_weapon_labels[item],
-                selection == item
+                selection == category_index
             );
             if (g_weapon_team[item] != 0u &&
                 g_weapon_team[item] != player_team) {
@@ -1316,7 +1536,7 @@ static void draw_buy_menu(
             draw_button(
                 fb, 28, y, 158, 23,
                 g_equipment_labels[equipment],
-                selection == item
+                selection == category_index
             );
             if (item == BUY_ITEM_DEFUSE &&
                 player_team != TEAM_CT) {
@@ -1329,6 +1549,7 @@ static void draw_buy_menu(
             }
         }
     }
+    draw_button(fb, 28, 205, 82, 27, "BACK", 0);
     draw_button(fb, 232, 205, 82, 27, "START ROUND", 0);
 }
 
@@ -1382,14 +1603,19 @@ static int find_team_spawn(
 }
 
 static int load_muzzle_sprite(
-    lite_arena_t *model_arena, uint32_t weapon
+    c15_muzzle_sprite_t *muzzle,
+    lite_arena_t *arena,
+    uint32_t weapon
 )
 {
     c15_pak_entry_t entry;
     uint8_t *chunk;
     uint32_t frame_bytes;
     uint32_t expected;
-    bda_memset(&g_muzzle, 0, sizeof(g_muzzle));
+    if (!muzzle || !arena) {
+        return 0;
+    }
+    bda_memset(muzzle, 0, sizeof(*muzzle));
     if (weapon == WEAPON_KNIFE) {
         return 1;
     }
@@ -1400,7 +1626,7 @@ static int load_muzzle_sprite(
         return 0;
     }
     chunk = (uint8_t *)lite_arena_alloc(
-        model_arena, entry.packed_size, 16u
+        arena, entry.packed_size, 16u
     );
     if (!chunk ||
         !c15_pak_read(
@@ -1409,30 +1635,70 @@ static int load_muzzle_sprite(
         read_u16(chunk + 4) != entry.packed_size) {
         return 0;
     }
-    g_muzzle.width = chunk[6];
-    g_muzzle.height = chunk[7];
-    g_muzzle.frame_count = chunk[8];
-    g_muzzle.anchor_count = chunk[9];
-    g_muzzle.display_size = chunk[10];
+    muzzle->width = chunk[6];
+    muzzle->height = chunk[7];
+    muzzle->frame_count = chunk[8];
+    muzzle->anchor_count = chunk[9];
+    muzzle->display_size = chunk[10];
     frame_bytes = (
-        (uint32_t)g_muzzle.width * g_muzzle.height + 1u
+        (uint32_t)muzzle->width * muzzle->height + 1u
     ) / 2u;
-    expected = 44u + (uint32_t)g_muzzle.anchor_count * 6u +
-        (uint32_t)g_muzzle.frame_count * frame_bytes;
-    if (g_muzzle.width == 0u || g_muzzle.width > 32u ||
-        g_muzzle.height == 0u || g_muzzle.height > 32u ||
-        g_muzzle.frame_count == 0u || g_muzzle.frame_count > 4u ||
-        g_muzzle.anchor_count == 0u || g_muzzle.anchor_count > 16u ||
-        g_muzzle.display_size == 0u || g_muzzle.display_size > 64u ||
+    expected = 44u + (uint32_t)muzzle->anchor_count * 6u +
+        (uint32_t)muzzle->frame_count * frame_bytes;
+    if (muzzle->width == 0u || muzzle->width > 32u ||
+        muzzle->height == 0u || muzzle->height > 32u ||
+        muzzle->frame_count == 0u || muzzle->frame_count > 4u ||
+        muzzle->anchor_count == 0u || muzzle->anchor_count > 16u ||
+        muzzle->display_size == 0u || muzzle->display_size > 64u ||
         chunk[11] != 0u || expected != entry.packed_size) {
-        bda_memset(&g_muzzle, 0, sizeof(g_muzzle));
+        bda_memset(muzzle, 0, sizeof(*muzzle));
         return 0;
     }
-    g_muzzle.chunk = chunk;
-    g_muzzle.anchors = chunk + 44u;
-    g_muzzle.pixels = g_muzzle.anchors +
-        (uint32_t)g_muzzle.anchor_count * 6u;
-    g_muzzle.loaded = 1u;
+    muzzle->chunk = chunk;
+    muzzle->anchors = chunk + 44u;
+    muzzle->pixels = muzzle->anchors +
+        (uint32_t)muzzle->anchor_count * 6u;
+    muzzle->loaded = 1u;
+    return 1;
+}
+
+static int load_view_cache(lite_arena_t *arena)
+{
+    uint32_t weapon;
+    if (!arena) {
+        return 0;
+    }
+    lite_arena_reset(arena);
+    g_view_cache_loaded = 0;
+    bda_memset(g_view_models, 0, sizeof(g_view_models));
+    bda_memset(g_view_animations, 0, sizeof(g_view_animations));
+    bda_memset(g_muzzle_sprites, 0, sizeof(g_muzzle_sprites));
+    for (weapon = 0u; weapon < WEAPON_COUNT; ++weapon) {
+        if (!c15_model_load(
+                &g_view_models[weapon], &g_pak,
+                g_weapon_assets[weapon], arena,
+                g_load_scratch, sizeof(g_load_scratch)) ||
+            !c15_model_animation_open(
+                &g_view_animations[weapon],
+                &g_view_models[weapon], &g_pak,
+                g_weapon_animation_assets[weapon],
+                g_load_scratch, sizeof(g_load_scratch)) ||
+            !c15_model_animation_make_resident(
+                &g_view_animations[weapon], &g_pak, arena) ||
+            !load_muzzle_sprite(
+                &g_muzzle_sprites[weapon], arena, weapon)) {
+            lite_log_line("view cache load failed");
+            lite_log_u32("view_cache_failed_weapon", weapon);
+            lite_log_u32(
+                "view_cache_arena_used", (uint32_t)arena->used
+            );
+            lite_log_u32(
+                "view_cache_arena_failures", arena->failures
+            );
+            return 0;
+        }
+    }
+    g_view_cache_loaded = 1;
     return 1;
 }
 
@@ -1443,7 +1709,17 @@ static void change_weapon(
     uint32_t requested
 )
 {
+    if (g_view_cache_loaded && requested < WEAPON_COUNT) {
+        *weapon = requested;
+        g_view_model = g_view_models[requested];
+        g_view_animation = g_view_animations[requested];
+        g_muzzle = g_muzzle_sprites[requested];
+        return;
+    }
     lite_arena_rewind(model_arena, persistent_models);
+    lite_arena_rewind(
+        &g_animation_arena, g_persistent_animation_bytes
+    );
     *weapon = requested;
     if (!c15_model_load(
             &g_view_model, &g_pak, g_weapon_assets[requested],
@@ -1452,7 +1728,9 @@ static void change_weapon(
             &g_view_animation, &g_view_model, &g_pak,
             g_weapon_animation_assets[requested],
             g_load_scratch, sizeof(g_load_scratch)) ||
-        !load_muzzle_sprite(model_arena, requested)) {
+        !c15_model_animation_make_resident(
+            &g_view_animation, &g_pak, &g_animation_arena) ||
+        !load_muzzle_sprite(&g_muzzle, model_arena, requested)) {
         lite_log_line("view model load failed");
         bda_memset(&g_view_model, 0, sizeof(g_view_model));
         bda_memset(&g_view_animation, 0, sizeof(g_view_animation));
@@ -1826,6 +2104,8 @@ static int load_game_resources(
     lite_arena_reset(map_arena);
     lite_arena_reset(texture_arena);
     lite_arena_reset(model_arena);
+    lite_arena_reset(&g_animation_arena);
+    g_persistent_animation_bytes = 0u;
     /*
      * The historical splash allocation is released before this function.
      * Clear the pointer so the in-game buy menu cannot sample the new map
@@ -1912,6 +2192,26 @@ static int load_game_resources(
         lite_log_line("load failed: anim/p_m4a1");
         return 0;
     }
+    if (!c15_model_animation_make_resident(
+            &g_t_locomotion, &g_pak, &g_animation_arena) ||
+        !c15_model_animation_make_resident(
+            &g_ct_locomotion, &g_pak, &g_animation_arena) ||
+        !c15_model_animation_make_resident(
+            &g_t_weapon_locomotion, &g_pak, &g_animation_arena) ||
+        !c15_model_animation_make_resident(
+            &g_ct_weapon_locomotion, &g_pak, &g_animation_arena)) {
+        lite_log_line("load failed: resident world animations");
+        lite_log_u32(
+            "animation_arena_used",
+            (uint32_t)g_animation_arena.used
+        );
+        lite_log_u32(
+            "animation_arena_failures",
+            g_animation_arena.failures
+        );
+        return 0;
+    }
+    g_persistent_animation_bytes = g_animation_arena.used;
     *persistent_models = model_arena->used;
     change_weapon(
         model_arena, *persistent_models, weapon,
@@ -1997,6 +2297,9 @@ static void initialize_round(
             now + g_bot_reaction_ms[difficulty] + index * 53u;
         bots[index].next_decision =
             now + 300u + index * 71u;
+        bots[index].next_visibility_check =
+            now + (index & 1u) * 40u;
+        bots[index].visibility_target = 0xffu;
         bots[index].strafe_right = (uint8_t)(index & 1u);
     }
     bda_memset(bomb, 0, sizeof(*bomb));
@@ -2077,9 +2380,8 @@ static void add_corpse(
     int32_t x, int32_t y, int32_t z,
     uint8_t team, uint32_t now
 );
-static uint32_t apply_hitgroup_damage(
-    uint32_t base, uint8_t hitgroup,
-    uint16_t *armor, uint8_t helmet
+static uint32_t apply_explosion_damage(
+    uint32_t base, uint16_t *armor
 );
 
 static int hostage_player_use(
@@ -2440,8 +2742,8 @@ static void grenade_logic(
                 }
                 damage = 110u -
                     (distance * 90u) / (360u * 360u);
-                damage = apply_hitgroup_damage(
-                    damage, 2u, &bot->armor, bot->helmet
+                damage = apply_explosion_damage(
+                    damage, &bot->armor
                 );
                 if (bot->health <= damage) {
                     bot->health = 0u;
@@ -2479,8 +2781,8 @@ static void grenade_logic(
                     player->x, player->y, player->z + 28)) {
                 uint32_t damage = 110u -
                     (distance * 90u) / (360u * 360u);
-                damage = apply_hitgroup_damage(
-                    damage, 2u, player_armor, 0u
+                damage = apply_explosion_damage(
+                    damage, player_armor
                 );
                 if (*player_health <= damage) {
                     *player_health = 0u;
@@ -2645,43 +2947,19 @@ static void add_corpse(
     corpses[selected].active = 1u;
 }
 
-static uint32_t apply_hitgroup_damage(
+static uint32_t apply_explosion_damage(
     uint32_t base,
-    uint8_t hitgroup,
-    uint16_t *armor,
-    uint8_t helmet
+    uint16_t *armor
 )
 {
     uint32_t damage = base;
-    int protected_hit = 0;
-    if (hitgroup == 1u) {
-        damage *= 4u;
-        protected_hit = helmet != 0u;
-    } else if (hitgroup == 3u) {
-        damage = (damage * 3u + 3u) / 4u;
-    } else {
-        protected_hit = 1;
-    }
-    if (armor && *armor != 0u && protected_hit) {
+    if (armor && *armor != 0u) {
         uint32_t absorbed = (damage * 2u + 4u) / 5u;
         if (absorbed > *armor) {
             absorbed = *armor;
         }
         *armor = (uint16_t)(*armor - absorbed);
         damage -= absorbed;
-    }
-    return damage == 0u ? 1u : damage;
-}
-
-static uint32_t range_adjusted_damage(
-    uint32_t damage, uint32_t weapon, uint32_t distance
-)
-{
-    uint32_t steps = distance / 500u;
-    while (steps-- != 0u) {
-        damage = (
-            damage * g_weapon_range_modifier_q8[weapon] + 128u
-        ) >> 8;
     }
     return damage == 0u ? 1u : damage;
 }
@@ -2788,6 +3066,7 @@ static void bot_logic(
     uint32_t now,
     uint32_t *shots,
     uint32_t *hits,
+    uint32_t *visibility_traces,
     uint32_t *sound_weapon,
     uint32_t *player_deaths,
     c15_corpse_t corpses[CORPSE_MAX],
@@ -2810,6 +3089,8 @@ static void bot_logic(
         uint32_t move_distance;
         uint32_t controls = 0u;
         int target_visible;
+        int visibility_candidate;
+        uint8_t visibility_target;
         int32_t nav_x = 0;
         int32_t nav_y = 0;
         int32_t nav_z = 0;
@@ -2867,22 +3148,37 @@ static void bot_logic(
         target_yaw = yaw_from_delta(
             target_x - bot->mover.x, target_y - bot->mover.y
         );
-        target_visible =
+        visibility_candidate =
             nearest < BOT_SIGHT_DISTANCE * BOT_SIGHT_DISTANCE &&
             abs_i32(bot->mover.z - target_z) < 160u &&
             (nearest < BOT_CLOSE_AWARE_DISTANCE *
                        BOT_CLOSE_AWARE_DISTANCE ||
              yaw_distance(target_yaw, bot->mover.yaw) <= 56u) &&
-            clear_line(
-                 &g_map,
-                 bot->mover.x, bot->mover.y, bot->mover.z + 28,
-                 target_x, target_y, target_z + 28
-            ) &&
-            !line_crosses_smoke(
-                grenades,
-                bot->mover.x, bot->mover.y, target_x, target_y
-            ) &&
             !time_active(now, bot->flash_until);
+        visibility_target = target < 0 ?
+            0u : (uint8_t)(target + 1);
+        if (!visibility_candidate) {
+            bot->visibility_cached = 0u;
+            bot->visibility_target = visibility_target;
+        } else if (bot->visibility_target != visibility_target ||
+                   time_reached(now, bot->next_visibility_check)) {
+            bot->visibility_cached = (uint8_t)(
+                clear_line(
+                    &g_map,
+                    bot->mover.x, bot->mover.y, bot->mover.z + 28,
+                    target_x, target_y, target_z + 28
+                ) &&
+                !line_crosses_smoke(
+                    grenades,
+                    bot->mover.x, bot->mover.y, target_x, target_y
+                )
+            );
+            bot->visibility_target = visibility_target;
+            bot->next_visibility_check =
+                now + 80u + (index & 1u) * 20u;
+            ++*visibility_traces;
+        }
+        target_visible = bot->visibility_cached != 0u;
         if (target_visible) {
             bot->last_enemy_x = target_x;
             bot->last_enemy_y = target_y;
@@ -3160,9 +3456,10 @@ static void bot_logic(
                 {
                     uint8_t hitgroup =
                         (bot->aim_seed & 15u) == 0u ? 1u : 2u;
-                    uint32_t damage = apply_hitgroup_damage(
+                    uint32_t damage = c15_damage_apply_bullet(
                         g_bot_damage[difficulty], hitgroup,
-                        armor, helmet
+                        armor, helmet,
+                        g_weapon_armor_ratio_q8[bot->weapon]
                     );
                 if (*health <= damage) {
                     *health = 0u;
@@ -3549,6 +3846,7 @@ static int player_fire_hit(
     uint16_t shot_yaw_q8,
     int16_t shot_pitch_q8,
     int secondary_attack,
+    int silenced,
     uint32_t *money,
     c15_corpse_t corpses[CORPSE_MAX],
     c15_impact_t impacts[IMPACT_MAX],
@@ -3792,10 +4090,11 @@ static int player_fire_hit(
         uint32_t axis_distance = abs_i32(selected_hit_y - camera->y);
         uint32_t damage;
         if (axis_distance > distance) distance = axis_distance;
-        damage = range_adjusted_damage(
+        damage = c15_damage_range_adjusted(
             weapon == WEAPON_KNIFE && secondary_attack ?
-                65u : g_weapon_damage[weapon],
-            weapon, distance
+                65u : weapon_base_damage(weapon, silenced),
+            weapon_range_modifier_q8(weapon, silenced),
+            distance
         );
         add_impact(
             impacts, selected_hit_x, selected_hit_y,
@@ -3810,8 +4109,9 @@ static int player_fire_hit(
         if (selected_hostage >= 0) {
             c15_hostage_t *hostage =
                 &hostages[(uint32_t)selected_hostage];
-            damage = apply_hitgroup_damage(
-                damage, hitgroup, 0, 0u
+            damage = c15_damage_apply_bullet(
+                damage, hitgroup, 0, 0u,
+                g_weapon_armor_ratio_q8[weapon]
             );
             if (hostage->health <= damage) {
                 hostage->health = 0u;
@@ -3840,8 +4140,9 @@ static int player_fire_hit(
             return 1;
         } else {
             c15_bot_t *bot = &bots[(uint32_t)selected];
-            damage = apply_hitgroup_damage(
-                damage, hitgroup, &bot->armor, bot->helmet
+            damage = c15_damage_apply_bullet(
+                damage, hitgroup, &bot->armor, bot->helmet,
+                g_weapon_armor_ratio_q8[weapon]
             );
             if (bot->health <= damage) {
                 bot->health = 0u;
@@ -3894,14 +4195,15 @@ static void team_counts(
     }
 }
 
-static void draw_scoreboard(
+static void draw_pause_menu(
     lite_framebuffer_t *fb,
     const c15_bot_t bots[BOT_COUNT],
     uint8_t player_team,
     uint32_t player_kills,
     uint32_t player_deaths,
     uint32_t rounds_t,
-    uint32_t rounds_ct
+    uint32_t rounds_ct,
+    uint32_t selection
 )
 {
     uint16_t white = lite_rgb565(238u, 244u, 239u);
@@ -3909,35 +4211,38 @@ static void draw_scoreboard(
     uint16_t red = lite_rgb565(235u, 78u, 64u);
     uint16_t green = lite_rgb565(82u, 203u, 122u);
     uint32_t index;
-    lite_fb_blend_rect(fb, 42, 24, 214, 190, lite_rgb565(12u, 22u, 22u));
-    lite_fb_frame(fb, 42, 24, 214, 190, gold);
-    lite_fb_text(fb, 92, 32, "SCOREBOARD", 1, gold);
-    lite_fb_text(fb, 53, 48, "NAME", 1, white);
-    lite_fb_text(fb, 142, 48, "TEAM", 1, white);
-    lite_fb_text(fb, 194, 48, "K", 1, white);
-    lite_fb_text(fb, 224, 48, "D", 1, white);
-    lite_fb_text(fb, 53, 63, "YOU", 1, gold);
+    lite_fb_clear(fb, lite_rgb565(8u, 14u, 14u));
+    lite_fb_frame(fb, 18, 8, 284, 224, gold);
+    lite_fb_text(fb, 121, 15, "GAME PAUSED", 1, gold);
+    lite_fb_text(fb, 36, 34, "NAME", 1, white);
+    lite_fb_text(fb, 151, 34, "TEAM", 1, white);
+    lite_fb_text(fb, 210, 34, "K", 1, white);
+    lite_fb_text(fb, 250, 34, "D", 1, white);
+    lite_fb_line(fb, 32, 45, 287, 45, lite_rgb565(68u, 78u, 67u));
+    lite_fb_text(fb, 36, 51, "YOU", 1, gold);
     lite_fb_text(
-        fb, 142, 63, player_team == TEAM_T ? "T" : "CT", 1,
+        fb, 151, 51, player_team == TEAM_T ? "T" : "CT", 1,
         player_team == TEAM_T ? red : green
     );
-    lite_fb_u32(fb, 194, 63, player_kills, 1, white);
-    lite_fb_u32(fb, 224, 63, player_deaths, 1, white);
+    lite_fb_u32(fb, 210, 51, player_kills, 1, white);
+    lite_fb_u32(fb, 250, 51, player_deaths, 1, white);
     for (index = 0u; index < BOT_COUNT; ++index) {
-        int y = 79 + (int)index * 16;
-        lite_fb_text(fb, 53, y, "BOT", 1, white);
-        lite_fb_u32(fb, 74, y, index + 1u, 1, white);
+        int y = 66 + (int)index * 15;
+        lite_fb_text(fb, 36, y, "BOT", 1, white);
+        lite_fb_u32(fb, 57, y, index + 1u, 1, white);
         lite_fb_text(
-            fb, 142, y, bots[index].team == TEAM_T ? "T" : "CT", 1,
+            fb, 151, y, bots[index].team == TEAM_T ? "T" : "CT", 1,
             bots[index].team == TEAM_T ? red : green
         );
-        lite_fb_u32(fb, 194, y, bots[index].kills, 1, white);
-        lite_fb_u32(fb, 224, y, bots[index].deaths, 1, white);
+        lite_fb_u32(fb, 210, y, bots[index].kills, 1, white);
+        lite_fb_u32(fb, 250, y, bots[index].deaths, 1, white);
     }
-    lite_fb_text(fb, 62, 195, "T", 1, red);
-    lite_fb_u32(fb, 74, 195, rounds_t, 1, white);
-    lite_fb_text(fb, 146, 195, "CT", 1, green);
-    lite_fb_u32(fb, 164, 195, rounds_ct, 1, white);
+    lite_fb_text(fb, 76, 174, "T", 1, red);
+    lite_fb_u32(fb, 88, 174, rounds_t, 1, white);
+    lite_fb_text(fb, 199, 174, "CT", 1, green);
+    lite_fb_u32(fb, 217, 174, rounds_ct, 1, white);
+    draw_button(fb, 38, 195, 110, 27, "RESUME", selection == 0u);
+    draw_button(fb, 172, 195, 110, 27, "MAIN MENU", selection == 1u);
 }
 
 static void draw_fire_feedback(
@@ -4501,10 +4806,6 @@ static void render_game(
     uint8_t spectator_target,
     uint32_t money,
     uint32_t round,
-    uint32_t rounds_t,
-    uint32_t rounds_ct,
-    uint32_t player_kills,
-    uint32_t player_deaths,
     uint32_t fps_x10,
     uint32_t map_id,
     uint32_t weapon,
@@ -4536,7 +4837,8 @@ static void render_game(
     uint8_t round_reason,
     c15_render_stats_t *stats,
     c15_model_render_stats_t *view_stats,
-    c15_model_render_stats_t *entity_stats
+    c15_model_render_stats_t *entity_stats,
+    c15_render_frame_timing_t *timing
 )
 {
     uint16_t white = lite_rgb565(238u, 244u, 239u);
@@ -4546,12 +4848,20 @@ static void render_game(
     uint32_t t_alive;
     uint32_t ct_alive;
     uint32_t index;
+    uint32_t phase_started;
+    uint32_t phase_finished;
     int bob_q4 = view_bob_q4(input, now);
     (void)player;
+    bda_memset(timing, 0, sizeof(*timing));
+    phase_started = lite_platform_milliseconds();
     c15_render_world(
         &g_map, camera, view, g_depth, g_visible_surfaces,
         sizeof(g_visible_surfaces), stats
     );
+    phase_finished = lite_platform_milliseconds();
+    timing->world_ms = phase_finished - phase_started;
+    timing->world_clear_ms = stats->clear_ms;
+    phase_started = phase_finished;
     bda_memset(entity_stats, 0, sizeof(*entity_stats));
     for (index = 0u; index < BOT_COUNT; ++index) {
         const c15_model_t *body;
@@ -4565,6 +4875,14 @@ static void render_game(
             bots[index].mover.x, bots[index].mover.y
         );
         if (distance > 1800u * 1800u) {
+            continue;
+        }
+        if (!c15_render_world_point_visible(
+                &g_map,
+                bots[index].mover.x,
+                bots[index].mover.y,
+                bots[index].mover.z + 28)) {
+            ++timing->entity_pvs_culled;
             continue;
         }
         body = bots[index].team == TEAM_T ?
@@ -4597,6 +4915,9 @@ static void render_game(
         fb, camera, hostages, grenades, corpses, dropped,
         impacts, bomb, now
     );
+    phase_finished = lite_platform_milliseconds();
+    timing->entities_ms = phase_finished - phase_started;
+    phase_started = phase_finished;
     if (player_health != 0u && !zoomed) {
         c15_render_view_model(
             &g_view_model, view, g_depth,
@@ -4609,6 +4930,9 @@ static void render_game(
     } else {
         bda_memset(view_stats, 0, sizeof(*view_stats));
     }
+    phase_finished = lite_platform_milliseconds();
+    timing->view_ms = phase_finished - phase_started;
+    phase_started = phase_finished;
     {
         int gap = 4 + (int)(crosshair_spread_q8 / 80u);
         if (gap > 18) gap = 18;
@@ -4762,19 +5086,19 @@ static void render_game(
             lite_rgb565(255u, 255u, 245u)
         );
     }
-    if ((input->down & LITE_INPUT_SCORE) != 0u) {
-        draw_scoreboard(
-            fb, bots, player_team,
-            player_kills, player_deaths, rounds_t, rounds_ct
-        );
-    }
+    timing->hud_ms =
+        lite_platform_milliseconds() - phase_started;
 }
 
 static uint32_t menu_touch_item(
-    enum game_screen screen, int x, int y, uint32_t selection
+    enum game_screen screen,
+    int x,
+    int y,
+    uint32_t selection,
+    uint32_t buy_category
 )
 {
-    if (screen == SCREEN_BUY &&
+    if ((screen == SCREEN_BUY || screen == SCREEN_BUY_ITEMS) &&
         x >= 230 && x < (int)LITE_SCREEN_WIDTH &&
         y >= 201 && y < (int)LITE_SCREEN_HEIGHT) {
         return BUY_ITEM_START;
@@ -4800,10 +5124,24 @@ static uint32_t menu_touch_item(
         if (y >= 158 && y < 191) return 2u;
         if (y >= 190 && y < 225) return 3u;
     } else if (screen == SCREEN_BUY) {
-        if (y >= 86 && y < 226) {
+        if (y >= 82 && y < 204) {
+            uint32_t category = (uint32_t)(y - 82) / 20u;
+            return category < BUY_CATEGORY_COUNT ?
+                category : 0xffffffffu;
+        }
+    } else if (screen == SCREEN_BUY_ITEMS) {
+        uint32_t total = buy_category < BUY_CATEGORY_COUNT ?
+            g_buy_category_item_count[buy_category] : 0u;
+        if (x < 116 && y >= 201 &&
+            y < (int)LITE_SCREEN_HEIGHT) {
+            return BUY_ACTION_BACK;
+        }
+        if (y >= 86 && y < 196) {
             uint32_t row = (uint32_t)(y - 86) / 27u;
-            uint32_t item = buy_window_start(selection) + row;
-            return item < BUY_ITEM_START ? item : 0xffffffffu;
+            uint32_t item = buy_item_window_start(
+                selection, total
+            ) + row;
+            return item < total ? item : 0xffffffffu;
         }
     }
     return 0xffffffffu;
@@ -4818,6 +5156,12 @@ static void log_touch_gesture(const lite_touch_debug_t *debug)
     lite_log_u32("touch_application_pumps", debug->application_pumps);
     lite_log_i32("touch_net_dx", debug->net_dx);
     lite_log_i32("touch_net_dy", debug->net_dy);
+    lite_log_i32("touch_release_dx", debug->release_dx);
+    lite_log_i32("touch_release_dy", debug->release_dy);
+    lite_log_u32(
+        "touch_release_delta_suppressed",
+        debug->release_delta_suppressed
+    );
     lite_log_u32("touch_raw_event_cap_hits", debug->raw_event_cap_hits);
     lite_log_line("touch_diag_end");
 }
@@ -4830,6 +5174,7 @@ int bda_main(void)
     lite_arena_t map_arena;
     lite_arena_t texture_arena;
     lite_arena_t model_arena;
+    lite_arena_t view_cache_arena;
     lite_input_t input;
     c15_camera_t camera;
     c15_player_t player;
@@ -4844,6 +5189,20 @@ int bda_main(void)
     c15_render_stats_t stats = {0};
     c15_model_render_stats_t view_stats = {0};
     c15_model_render_stats_t entity_stats = {0};
+    c15_render_frame_timing_t frame_timing = {0};
+    c15_timing_accumulator_t logic_timing = {0};
+    c15_timing_accumulator_t fire_logic_timing = {0};
+    c15_timing_accumulator_t player_logic_timing = {0};
+    c15_timing_accumulator_t bot_logic_timing = {0};
+    c15_timing_accumulator_t objective_logic_timing = {0};
+    c15_timing_accumulator_t logic_steps_timing = {0};
+    c15_timing_accumulator_t audio_timing = {0};
+    c15_timing_accumulator_t world_timing = {0};
+    c15_timing_accumulator_t world_clear_timing = {0};
+    c15_timing_accumulator_t entity_timing = {0};
+    c15_timing_accumulator_t view_timing = {0};
+    c15_timing_accumulator_t hud_timing = {0};
+    c15_timing_accumulator_t present_timing = {0};
     c15_audio_t audio;
     c15_view_animation_state_t view_animation = {
         C15_VIEW_ANIMATION_IDLE, 0u, 0u
@@ -4851,18 +5210,31 @@ int bda_main(void)
     c15_world_animation_state_t t_animation = {0xffu, 0xffu};
     c15_world_animation_state_t ct_animation = {0xffu, 0xffu};
     enum game_screen screen = SCREEN_MAIN;
+    enum game_screen paused_screen = SCREEN_PLAY;
     uint32_t selection = 0u;
     uint32_t menu_count = 3u;
+    uint32_t paused_at = 0u;
+    uint32_t paused_selection = 0u;
+    uint32_t paused_menu_count = 0u;
     uint32_t next_frame;
     uint32_t next_logic = 0u;
+    uint32_t next_audio_service = 0u;
     uint32_t next_metric;
     uint32_t fps_last_frame;
     uint32_t frame = 0u;
     uint32_t fps_x10 = 0u;
     uint32_t render_ms_x10 = 0u;
     uint32_t present_ms_x10 = 0u;
+    uint32_t pending_logic_ms = 0u;
+    uint32_t pending_fire_logic_ms = 0u;
+    uint32_t pending_player_logic_ms = 0u;
+    uint32_t pending_bot_logic_ms = 0u;
+    uint32_t pending_objective_logic_ms = 0u;
+    uint32_t pending_logic_steps = 0u;
+    uint32_t pending_audio_ms = 0u;
     uint32_t pending_controls = 0u;
     uint32_t map_id = MAP_DE_DUST2;
+    uint32_t buy_category = BUY_CATEGORY_PISTOLS;
     uint32_t weapon = WEAPON_GLOCK;
     uint32_t fire_until = 0u;
     uint32_t hit_until = 0u;
@@ -4872,6 +5244,9 @@ int bda_main(void)
     uint32_t shots_hit = 0u;
     uint32_t bot_shots = 0u;
     uint32_t bot_hits = 0u;
+    uint32_t bot_visibility_traces = 0u;
+    uint32_t logic_skipped_steps = 0u;
+    uint32_t logic_skipped_steps_window = 0u;
     uint32_t bot_sound_weapon = WEAPON_COUNT;
     uint32_t money = 4000u;
     uint32_t round = 1u;
@@ -4922,6 +5297,10 @@ int bda_main(void)
     uint32_t map_memory_bytes = 0u;
     uint8_t *texture_memory = 0;
     uint32_t texture_memory_bytes = 0u;
+    uint8_t *audio_memory = 0;
+    uint32_t audio_memory_bytes = 0u;
+    uint8_t *view_cache_memory = 0;
+    uint32_t view_cache_memory_bytes = 0u;
 
     bda_memset(&input, 0, sizeof(input));
     bda_memset(&audio, 0, sizeof(audio));
@@ -4942,11 +5321,15 @@ int bda_main(void)
     bda_memset(grenade_counts, 0, sizeof(grenade_counts));
     camera.focal_length = DEFAULT_FOCAL_LENGTH;
     lite_log_reset();
-    lite_log_line("CS15 Lite M19 classic world/player textures start");
+    lite_log_line("CS15 Lite M20 performance pass 7 start");
+    lite_log_u32("logic_catchup_limit", LOGIC_MAX_CATCHUP_STEPS);
     lite_log_line(
         "game_flow=freeze-buy-drops-spectator-objectives-scoreboard"
     );
     lite_log_line("renderer=fast-clip-scanline-direct-tile");
+    lite_log_line("entity_visibility=bsp-pvs-conservative");
+    lite_log_line("model_division=exact-q16-hardware-fast-path");
+    lite_log_line("view_depth=lazy-8x8-tiles");
     lite_log_line(
         "bot_ai=roles-routes-last-seen-range-strafe-burst-grenades"
     );
@@ -4957,10 +5340,23 @@ int bda_main(void)
     );
     lite_log_line("bot_animation=goldsrc-hybrid-walk");
     lite_log_line("muzzle_flash=historical_additive_sprite");
-    lite_log_line("audio=historical_pcm-stream");
+    lite_log_line("audio=historical-pcm-resident-with-stream-fallback");
+    lite_log_line("audio_ready_poll=throttled-2ms");
+    lite_log_line("world_lighting=precomputed-rgb565-palettes");
+    lite_log_line(
+        "raster_inner_loop=opaque-specialized-power2-and-inrange-fast"
+    );
+    lite_log_line("render_compile=target-o2-hot-units");
+    lite_log_line("framebuffer_fill=aligned-rgb565-pairs");
+    lite_log_line("animation_frames=resident-all-view-and-world");
     lite_arena_init(&map_arena, 0, 0u);
     lite_arena_init(&texture_arena, 0, 0u);
     lite_arena_init(&model_arena, g_model_memory, sizeof(g_model_memory));
+    lite_arena_init(&view_cache_arena, 0, 0u);
+    lite_arena_init(
+        &g_animation_arena,
+        g_animation_memory, sizeof(g_animation_memory)
+    );
     framebuffer.pixels = g_screen;
     framebuffer.width = (int)LITE_SCREEN_WIDTH;
     framebuffer.height = (int)LITE_SCREEN_HEIGHT;
@@ -4989,7 +5385,52 @@ int bda_main(void)
             &audio, &g_pak, g_load_scratch,
             sizeof(g_load_scratch))) {
         lite_log_line("sound bank unavailable");
+    } else {
+        audio_memory_bytes = c15_audio_resident_size(&audio);
+        audio_memory = (uint8_t *)bda_alloc(audio_memory_bytes);
+        if (!audio_memory ||
+            !c15_audio_load_resident(
+                &audio, &g_pak, audio_memory,
+                audio_memory_bytes)) {
+            if (audio_memory) {
+                bda_free(audio_memory);
+                audio_memory = 0;
+            }
+            audio_memory_bytes = 0u;
+            lite_log_line("audio residency unavailable; streaming");
+        }
     }
+    lite_log_u32("audio_resident_bytes", audio_memory_bytes);
+    draw_loading(
+        &framebuffer, "CACHING WEAPONS",
+        lite_rgb565(244u, 181u, 46u)
+    );
+    (void)lite_platform_present(g_screen);
+    view_cache_memory = (uint8_t *)bda_alloc(VIEW_CACHE_ARENA_BYTES);
+    if (view_cache_memory) {
+        lite_arena_init(
+            &view_cache_arena,
+            view_cache_memory, VIEW_CACHE_ARENA_BYTES
+        );
+        if (load_view_cache(&view_cache_arena)) {
+            view_cache_memory_bytes =
+                (uint32_t)view_cache_arena.used;
+        } else {
+            bda_free(view_cache_memory);
+            view_cache_memory = 0;
+            lite_arena_init(&view_cache_arena, 0, 0u);
+            lite_log_line(
+                "view cache unavailable; load current weapon on demand"
+            );
+        }
+    } else {
+        lite_log_line(
+            "view cache allocation failed; load current weapon on demand"
+        );
+    }
+    lite_log_u32(
+        "view_cache_resident_bytes", view_cache_memory_bytes
+    );
     c15_audio_set_enabled(
         &audio, audio_enabled,
         g_load_scratch, sizeof(g_load_scratch)
@@ -5015,15 +5456,176 @@ int bda_main(void)
         int touch_new = input.touch_down && !previous_touch_down;
         uint32_t activated = 0xffffffffu;
         lite_touch_debug_t touch_debug;
-        (void)c15_audio_service(
+        service_audio_throttled(
             &audio, &g_pak, g_load_scratch,
-            sizeof(g_load_scratch)
+            sizeof(g_load_scratch), now,
+            &next_audio_service, &pending_audio_ms
         );
         previous_touch_down = input.touch_down;
         if (lite_platform_touch_debug_take(&touch_debug)) {
             log_touch_gesture(&touch_debug);
         }
-        if (screen == SCREEN_BUY && game_loaded &&
+        {
+            int resume_pause = 0;
+            int leave_paused_game = 0;
+            if ((input.pressed & LITE_INPUT_PAUSE) != 0u) {
+                if (screen == SCREEN_PAUSE) {
+                    resume_pause = 1;
+                } else if (game_loaded &&
+                           (screen == SCREEN_BUY ||
+                            screen == SCREEN_BUY_ITEMS ||
+                            screen == SCREEN_PLAY ||
+                            screen == SCREEN_ROUND_END)) {
+                    paused_screen = screen;
+                    paused_selection = selection;
+                    paused_menu_count = menu_count;
+                    paused_at = now;
+                    screen = SCREEN_PAUSE;
+                    selection = 0u;
+                    menu_count = 2u;
+                    input.down = 0u;
+                    input.pressed = 0u;
+                } else if (screen == SCREEN_MAIN) {
+                    running = 0;
+                }
+            }
+            if (screen == SCREEN_PAUSE && !resume_pause) {
+                if ((input.pressed &
+                     (LITE_INPUT_UP | LITE_INPUT_LEFT)) != 0u) {
+                    selection = selection == 0u ? 1u : 0u;
+                }
+                if ((input.pressed &
+                     (LITE_INPUT_DOWN | LITE_INPUT_RIGHT)) != 0u) {
+                    selection = selection == 0u ? 1u : 0u;
+                }
+                if (touch_new && input.touch_y >= 190 &&
+                    input.touch_y < 230) {
+                    if (input.touch_x >= 34 && input.touch_x < 154) {
+                        selection = 0u;
+                        resume_pause = 1;
+                    } else if (input.touch_x >= 166 &&
+                               input.touch_x < 288) {
+                        selection = 1u;
+                        leave_paused_game = 1;
+                    }
+                }
+                if ((input.pressed & LITE_INPUT_FIRE) != 0u) {
+                    if (selection == 0u) {
+                        resume_pause = 1;
+                    } else {
+                        leave_paused_game = 1;
+                    }
+                }
+            }
+            if (resume_pause) {
+                uint32_t elapsed = now - paused_at;
+                uint32_t index;
+                pause_shift_timestamp(&next_logic, elapsed);
+                pause_shift_timestamp(&fire_until, elapsed);
+                pause_shift_timestamp(&hit_until, elapsed);
+                pause_shift_timestamp(&fire_started, elapsed);
+                pause_shift_timestamp(&next_fire, elapsed);
+                pause_shift_timestamp(&round_end_at, elapsed);
+                pause_shift_timestamp(&round_deadline, elapsed);
+                pause_shift_timestamp(&buy_deadline, elapsed);
+                pause_shift_timestamp(&freeze_until, elapsed);
+                pause_shift_timestamp(&flash_until, elapsed);
+                pause_shift_timestamp(&next_step_sound, elapsed);
+                pause_shift_timestamp(&weapon_press_started, elapsed);
+                pause_shift_timestamp(&burst_next_fire, elapsed);
+                pause_shift_timestamp(&view_animation.next_frame, elapsed);
+                for (index = 0u; index < BOT_COUNT; ++index) {
+                    pause_shift_timestamp(
+                        &bots[index].next_fire, elapsed
+                    );
+                    pause_shift_timestamp(
+                        &bots[index].next_decision, elapsed
+                    );
+                    pause_shift_timestamp(
+                        &bots[index].next_visibility_check, elapsed
+                    );
+                    pause_shift_timestamp(
+                        &bots[index].flash_until, elapsed
+                    );
+                    pause_shift_timestamp(
+                        &bots[index].last_enemy_seen, elapsed
+                    );
+                }
+                pause_shift_timestamp(&bomb.action_started, elapsed);
+                pause_shift_timestamp(&bomb.explode_at, elapsed);
+                pause_shift_timestamp(&bomb.next_beep, elapsed);
+                for (index = 0u; index < GRENADE_MAX; ++index) {
+                    pause_shift_timestamp(
+                        &grenades[index].detonate_at, elapsed
+                    );
+                }
+                for (index = 0u; index < CORPSE_MAX; ++index) {
+                    pause_shift_timestamp(
+                        &corpses[index].died_at, elapsed
+                    );
+                }
+                for (index = 0u; index < DROPPED_WEAPON_MAX; ++index) {
+                    pause_shift_timestamp(
+                        &dropped[index].dropped_at, elapsed
+                    );
+                }
+                for (index = 0u; index < IMPACT_MAX; ++index) {
+                    pause_shift_timestamp(
+                        &impacts[index].until, elapsed
+                    );
+                }
+                pause_shift_timestamp(&kill_feed.until, elapsed);
+                screen = paused_screen;
+                selection = paused_selection;
+                menu_count = paused_menu_count;
+                paused_at = 0u;
+                input.down = 0u;
+                input.pressed = 0u;
+            } else if (leave_paused_game) {
+                g_menu_background = 0;
+                if (map_memory) {
+                    bda_free(map_memory);
+                    map_memory = 0;
+                }
+                if (texture_memory) {
+                    bda_free(texture_memory);
+                    texture_memory = 0;
+                }
+                map_memory_bytes = 0u;
+                texture_memory_bytes = MENU_TEXTURE_ARENA_BYTES;
+                lite_arena_init(&map_arena, 0, 0u);
+                texture_memory = (uint8_t *)bda_alloc(
+                    texture_memory_bytes
+                );
+                if (texture_memory) {
+                    lite_arena_init(
+                        &texture_arena, texture_memory,
+                        texture_memory_bytes
+                    );
+                    if (!load_menu_background(&texture_arena)) {
+                        lite_log_line(
+                            "historical menu splash unavailable"
+                        );
+                    }
+                } else {
+                    lite_arena_init(&texture_arena, 0, 0u);
+                    lite_log_line("menu texture allocation failed");
+                }
+                game_loaded = 0;
+                reloading = 0;
+                burst_remaining = 0u;
+                pending_controls = 0u;
+                pending_alt_attack = 0;
+                paused_at = 0u;
+                screen = SCREEN_MAIN;
+                selection = 0u;
+                menu_count = 3u;
+                input.down = 0u;
+                input.pressed = 0u;
+            }
+        }
+        if ((screen == SCREEN_BUY || screen == SCREEN_BUY_ITEMS) &&
+            game_loaded &&
             buy_deadline != 0u &&
             time_reached(now, buy_deadline)) {
             screen = SCREEN_PLAY;
@@ -5036,7 +5638,8 @@ int bda_main(void)
 
         if (screen == SCREEN_MAIN || screen == SCREEN_OPTIONS ||
             screen == SCREEN_MAP ||
-            screen == SCREEN_TEAM || screen == SCREEN_BUY) {
+            screen == SCREEN_TEAM || screen == SCREEN_BUY ||
+            screen == SCREEN_BUY_ITEMS) {
             if ((input.pressed & LITE_INPUT_UP) != 0u) {
                 selection = selection == 0u ?
                     menu_count - 1u : selection - 1u;
@@ -5046,7 +5649,8 @@ int bda_main(void)
             }
             if (touch_new) {
                 uint32_t item = menu_touch_item(
-                    screen, input.touch_x, input.touch_y, selection
+                    screen, input.touch_x, input.touch_y,
+                    selection, buy_category
                 );
                 if (item != 0xffffffffu) {
                     selection = item;
@@ -5290,8 +5894,9 @@ int bda_main(void)
                         );
                         game_loaded = 1;
                         screen = SCREEN_BUY;
-                        selection = weapon;
-                        menu_count = BUY_ITEM_START;
+                        buy_category = BUY_CATEGORY_PISTOLS;
+                        selection = buy_category;
+                        menu_count = BUY_CATEGORY_COUNT;
                         next_logic = now;
                         buy_deadline = now + BUY_TIME_MS;
                         round_deadline = 0u;
@@ -5304,8 +5909,24 @@ int bda_main(void)
                             "map_peak_bytes", (uint32_t)map_arena.peak
                         );
                         lite_log_u32(
+                            "map_capacity_bytes", map_memory_bytes
+                        );
+                        lite_log_u32(
+                            "map_visibility_resident",
+                            g_map.visibility_section &&
+                            g_map.visibility_section->data ? 1u : 0u
+                        );
+                        lite_log_u32(
+                            "visible_surface_capacity",
+                            C15_MAP_VISIBLE_BYTES * 8u
+                        );
+                        lite_log_u32(
                             "texture_peak_bytes",
                             (uint32_t)texture_arena.peak
+                        );
+                        lite_log_u32(
+                            "texture_capacity_bytes",
+                            texture_memory_bytes
                         );
                         lite_log_u32(
                             "texture_resident_if_eager_bytes",
@@ -5319,25 +5940,64 @@ int bda_main(void)
                             "persistent_model_bytes",
                             (uint32_t)persistent_models
                         );
+                        lite_log_u32(
+                            "persistent_animation_bytes",
+                            (uint32_t)g_persistent_animation_bytes
+                        );
+                        lite_log_u32(
+                            "animation_resident_bytes",
+                            (uint32_t)g_animation_arena.used
+                        );
                     }
                 } else if (screen == SCREEN_BUY) {
-                    if (activated < WEAPON_COUNT) {
-                        if (weapon_allowed_for_team(
-                                activated, player_team) &&
-                            (!owned[activated] ||
-                             weapon_ammo[activated] == 0u) &&
-                            money >= g_weapon_price[activated]) {
-                            money -= g_weapon_price[activated];
-                            own_weapon_in_slot(owned, activated);
-                            weapon_ammo[activated] =
-                                g_weapon_capacity[activated];
-                            weapon_reserve[activated] =
-                                g_weapon_reserve_max[activated];
+                    if (activated == BUY_ITEM_START) {
+                        screen = SCREEN_PLAY;
+                        selection = 0u;
+                        next_logic = now;
+                        if (round_deadline == 0u) {
+                            round_deadline =
+                                freeze_until + ROUND_TIME_MS;
                         }
-                        if (owned[activated]) {
+                    } else if (activated < BUY_CATEGORY_COUNT) {
+                        buy_category = activated;
+                        screen = SCREEN_BUY_ITEMS;
+                        selection = 0u;
+                        menu_count =
+                            g_buy_category_item_count[buy_category];
+                    }
+                } else if (screen == SCREEN_BUY_ITEMS) {
+                    uint32_t buy_item = buy_category_item(
+                        buy_category, activated
+                    );
+                    if (activated == BUY_ITEM_START) {
+                        screen = SCREEN_PLAY;
+                        selection = 0u;
+                        next_logic = now;
+                        if (round_deadline == 0u) {
+                            round_deadline =
+                                freeze_until + ROUND_TIME_MS;
+                        }
+                    } else if (activated == BUY_ACTION_BACK) {
+                        screen = SCREEN_BUY;
+                        selection = buy_category;
+                        menu_count = BUY_CATEGORY_COUNT;
+                    } else if (buy_item < WEAPON_COUNT) {
+                        if (weapon_allowed_for_team(
+                                buy_item, player_team) &&
+                            (!owned[buy_item] ||
+                             weapon_ammo[buy_item] == 0u) &&
+                            money >= g_weapon_price[buy_item]) {
+                            money -= g_weapon_price[buy_item];
+                            own_weapon_in_slot(owned, buy_item);
+                            weapon_ammo[buy_item] =
+                                g_weapon_capacity[buy_item];
+                            weapon_reserve[buy_item] =
+                                g_weapon_reserve_max[buy_item];
+                        }
+                        if (owned[buy_item]) {
                             change_weapon(
                                 &model_arena, persistent_models,
-                                &weapon, activated
+                                &weapon, buy_item
                             );
                             reloading = 0;
                             zoomed = 0;
@@ -5350,70 +6010,62 @@ int bda_main(void)
                                 C15_VIEW_ANIMATION_DRAW, now
                             );
                         }
-                    } else if (activated == BUY_ITEM_START) {
-                        screen = SCREEN_PLAY;
-                        selection = 0u;
-                        next_logic = now;
-                        if (round_deadline == 0u) {
-                            round_deadline =
-                                freeze_until + ROUND_TIME_MS;
-                        }
-                    } else {
+                    } else if (buy_item < BUY_ITEM_START) {
                         uint32_t price =
                             equipment_price(
-                                activated, player_armor
+                                buy_item, player_armor
                             );
                         int allowed = 1;
-                        if (activated == BUY_ITEM_DEFUSE &&
+                        if (buy_item == BUY_ITEM_DEFUSE &&
                             player_team != TEAM_CT) {
                             allowed = 0;
                         }
-                        if (activated == BUY_ITEM_HE &&
+                        if (buy_item == BUY_ITEM_HE &&
                             grenade_counts[GRENADE_HE] >= 1u) {
                             allowed = 0;
                         }
-                        if (activated == BUY_ITEM_FLASH &&
+                        if (buy_item == BUY_ITEM_FLASH &&
                             grenade_counts[GRENADE_FLASH] >= 2u) {
                             allowed = 0;
                         }
-                        if (activated == BUY_ITEM_SMOKE &&
+                        if (buy_item == BUY_ITEM_SMOKE &&
                             grenade_counts[GRENADE_SMOKE] >= 1u) {
                             allowed = 0;
                         }
-                        if (activated == BUY_ITEM_ARMOR &&
+                        if (buy_item == BUY_ITEM_ARMOR &&
                             player_armor >= 100u) {
                             allowed = 0;
                         }
-                        if (activated == BUY_ITEM_HELMET &&
+                        if (buy_item == BUY_ITEM_HELMET &&
                             player_helmet) {
                             allowed = 0;
                         }
-                        if (activated == BUY_ITEM_DEFUSE &&
+                        if (buy_item == BUY_ITEM_DEFUSE &&
                             player_defuse_kit) {
                             allowed = 0;
                         }
                         if (allowed && money >= price) {
                             money -= price;
-                            if (activated == BUY_ITEM_HE) {
+                            if (buy_item == BUY_ITEM_HE) {
                                 ++grenade_counts[GRENADE_HE];
-                            } else if (activated == BUY_ITEM_FLASH) {
+                            } else if (buy_item == BUY_ITEM_FLASH) {
                                 ++grenade_counts[GRENADE_FLASH];
-                            } else if (activated == BUY_ITEM_SMOKE) {
+                            } else if (buy_item == BUY_ITEM_SMOKE) {
                                 ++grenade_counts[GRENADE_SMOKE];
-                            } else if (activated == BUY_ITEM_ARMOR) {
+                            } else if (buy_item == BUY_ITEM_ARMOR) {
                                 player_armor = 100u;
                                 c15_audio_play(
                                     &audio, C15_SOUND_CUE_ARMOR,
                                     C15_SOUND_CHANNEL_PLAYER
                                 );
-                            } else if (activated == BUY_ITEM_HELMET) {
+                            } else if (buy_item == BUY_ITEM_HELMET) {
                                 player_helmet = 1u;
                                 if (player_armor < 100u) {
                                     player_armor = 100u;
                                 }
-                            } else if (activated == BUY_ITEM_DEFUSE) {
+                            } else if (buy_item == BUY_ITEM_DEFUSE) {
                                 player_defuse_kit = 1u;
-                            } else if (activated == BUY_ITEM_AMMO) {
+                            } else if (buy_item == BUY_ITEM_AMMO) {
                                 uint32_t ammo_weapon;
                                 for (ammo_weapon = 0u;
                                      ammo_weapon < WEAPON_COUNT;
@@ -5430,7 +6082,8 @@ int bda_main(void)
                     }
                 }
             }
-        } else if (game_loaded) {
+        } else if (game_loaded && screen != SCREEN_PAUSE) {
+            uint32_t logic_started = lite_platform_milliseconds();
             uint32_t logic_steps = 0u;
             int completed_animation = update_view_animation(
                 &view_animation, now
@@ -5499,8 +6152,8 @@ int bda_main(void)
                         &g_map, player_team,
                         player.x, player.y, player.z)) {
                     screen = SCREEN_BUY;
-                    selection = weapon;
-                    menu_count = BUY_ITEM_START;
+                    selection = buy_category;
+                    menu_count = BUY_CATEGORY_COUNT;
                 }
             }
             if (screen == SCREEN_PLAY &&
@@ -5618,6 +6271,8 @@ int bda_main(void)
                 burst_next_fire = now;
             }
             {
+                uint32_t fire_logic_started =
+                    lite_platform_milliseconds();
                 int secondary_attack = pending_alt_attack;
                 int fire_requested = secondary_attack;
                 if (burst_remaining != 0u &&
@@ -5691,6 +6346,7 @@ int bda_main(void)
                             bots, hostages, &camera,
                             player_team, weapon,
                             shot_yaw, shot_pitch, secondary_attack,
+                            silenced,
                             &money, corpses, impacts, &kill_feed,
                             now, &audio
                         );
@@ -5730,12 +6386,16 @@ int bda_main(void)
                     }
                     pending_alt_attack = 0;
                 }
+                pending_fire_logic_ms +=
+                    lite_platform_milliseconds() - fire_logic_started;
             }
             while (screen == SCREEN_PLAY &&
                    time_reached(now, next_logic) &&
-                   logic_steps < 4u) {
+                   logic_steps < LOGIC_MAX_CATCHUP_STEPS) {
                 uint32_t t_alive;
                 uint32_t ct_alive;
+                uint32_t phase_started =
+                    lite_platform_milliseconds();
                 if (player_health != 0u &&
                     !time_active(now, freeze_until)) {
                     int32_t old_x = player.x;
@@ -5761,6 +6421,9 @@ int bda_main(void)
                 if (recoil_q8 > 38u) recoil_q8 -= 38u;
                 else recoil_q8 = 0u;
                 crosshair_spread_q8 = recoil_q8;
+                pending_player_logic_ms +=
+                    lite_platform_milliseconds() - phase_started;
+                phase_started = lite_platform_milliseconds();
                 c15_map_dynamic_tick(&g_map);
                 hostage_logic(
                     hostages, bots, &player, player_team
@@ -5772,6 +6435,9 @@ int bda_main(void)
                     &kill_feed, &money, &player_kills,
                     &player_deaths, &audio, now
                 );
+                pending_objective_logic_ms +=
+                    lite_platform_milliseconds() - phase_started;
+                phase_started = lite_platform_milliseconds();
                 bot_sound_weapon = WEAPON_COUNT;
                 {
                     uint16_t health_before_bots = player_health;
@@ -5780,7 +6446,8 @@ int bda_main(void)
                         bots, grenades, hostages, &player, player_team,
                         &player_health, &player_armor, player_helmet,
                         bot_difficulty, map_id, &bomb, now,
-                        &bot_shots, &bot_hits, &bot_sound_weapon,
+                        &bot_shots, &bot_hits, &bot_visibility_traces,
+                        &bot_sound_weapon,
                         &player_deaths, corpses, &kill_feed
                     );
                 }
@@ -5812,6 +6479,9 @@ int bda_main(void)
                         C15_SOUND_CHANNEL_BOT
                     );
                 }
+                pending_bot_logic_ms +=
+                    lite_platform_milliseconds() - phase_started;
+                phase_started = lite_platform_milliseconds();
                 if (player_was_alive && player_health == 0u) {
                     drop_weapon(
                         dropped, weapon, weapon_ammo[weapon],
@@ -5983,9 +6653,20 @@ int bda_main(void)
                         round_end_at = now + ROUND_END_MS;
                     }
                 }
+                pending_objective_logic_ms +=
+                    lite_platform_milliseconds() - phase_started;
                 next_logic += LOGIC_INTERVAL_MS;
                 ++logic_steps;
             }
+            if (screen == SCREEN_PLAY &&
+                time_reached(now, next_logic)) {
+                uint32_t skipped =
+                    (now - next_logic) / LOGIC_INTERVAL_MS + 1u;
+                next_logic += skipped * LOGIC_INTERVAL_MS;
+                logic_skipped_steps += skipped;
+                logic_skipped_steps_window += skipped;
+            }
+            pending_logic_steps += logic_steps;
             if (screen == SCREEN_ROUND_END &&
                 time_reached(now, round_end_at)) {
                 int player_survived = player_health != 0u;
@@ -6075,12 +6756,14 @@ int bda_main(void)
                     &view_animation, C15_VIEW_ANIMATION_DRAW, now
                 );
                 screen = SCREEN_BUY;
-                selection = weapon;
-                menu_count = BUY_ITEM_START;
+                selection = buy_category;
+                menu_count = BUY_CATEGORY_COUNT;
                 next_logic = now;
                 buy_deadline = now + BUY_TIME_MS;
                 round_deadline = 0u;
             }
+            pending_logic_ms +=
+                lite_platform_milliseconds() - logic_started;
         }
 
         if (game_loaded && player_health == 0u &&
@@ -6100,6 +6783,7 @@ int bda_main(void)
             uint32_t frame_end;
             uint32_t frame_elapsed;
             uint32_t instant_fps_x10;
+            int rendered_game = 0;
             ++frame;
             next_frame += FRAME_INTERVAL_MS;
             if (time_reached(now, next_frame)) {
@@ -6118,16 +6802,26 @@ int bda_main(void)
             } else if (screen == SCREEN_TEAM) {
                 draw_team_menu(&framebuffer, selection);
             } else if (screen == SCREEN_BUY) {
-                draw_buy_menu(
-                    &framebuffer, money, selection, owned,
-                    player_team, player_armor
+                draw_buy_category_menu(
+                    &framebuffer, money, selection
+                );
+            } else if (screen == SCREEN_BUY_ITEMS) {
+                draw_buy_item_menu(
+                    &framebuffer, money, selection, buy_category,
+                    owned, player_team, player_armor
+                );
+            } else if (screen == SCREEN_PAUSE) {
+                draw_pause_menu(
+                    &framebuffer, bots, player_team,
+                    player_kills, player_deaths,
+                    rounds_t, rounds_ct, selection
                 );
             } else {
+                rendered_game = 1;
                 render_game(
                     &framebuffer, &view, &input, now, &camera, &player,
                     bots, player_team, player_health,
                     spectator_target, money, round,
-                    rounds_t, rounds_ct, player_kills, player_deaths,
                     fps_x10, map_id, weapon,
                     time_active(now, fire_until),
                     time_active(now, hit_until),
@@ -6142,7 +6836,8 @@ int bda_main(void)
                     crosshair_spread_q8,
                     flash_until, zoomed, silenced, glock_burst,
                     screen, round_winner, round_reason,
-                    &stats, &view_stats, &entity_stats
+                    &stats, &view_stats, &entity_stats,
+                    &frame_timing
                 );
             }
             render_finished = lite_platform_milliseconds();
@@ -6160,6 +6855,38 @@ int bda_main(void)
                     present_sample :
                     (present_ms_x10 * 3u + present_sample) / 4u;
             }
+            timing_add(&logic_timing, pending_logic_ms);
+            timing_add(&fire_logic_timing, pending_fire_logic_ms);
+            timing_add(&player_logic_timing, pending_player_logic_ms);
+            timing_add(&bot_logic_timing, pending_bot_logic_ms);
+            timing_add(
+                &objective_logic_timing,
+                pending_objective_logic_ms
+            );
+            timing_add(&logic_steps_timing, pending_logic_steps);
+            timing_add(&audio_timing, pending_audio_ms);
+            timing_add(
+                &present_timing, frame_end - render_finished
+            );
+            pending_logic_ms = 0u;
+            pending_fire_logic_ms = 0u;
+            pending_player_logic_ms = 0u;
+            pending_bot_logic_ms = 0u;
+            pending_objective_logic_ms = 0u;
+            pending_logic_steps = 0u;
+            pending_audio_ms = 0u;
+            if (rendered_game) {
+                timing_add(&world_timing, frame_timing.world_ms);
+                timing_add(
+                    &world_clear_timing,
+                    frame_timing.world_clear_ms
+                );
+                timing_add(
+                    &entity_timing, frame_timing.entities_ms
+                );
+                timing_add(&view_timing, frame_timing.view_ms);
+                timing_add(&hud_timing, frame_timing.hud_ms);
+            }
             frame_elapsed = frame_end - fps_last_frame;
             if (frame_elapsed != 0u) {
                 instant_fps_x10 = 10000u / frame_elapsed;
@@ -6175,6 +6902,105 @@ int bda_main(void)
             lite_log_u32("fps_x10", fps_x10);
             lite_log_u32("render_ms_x10", render_ms_x10);
             lite_log_u32("present_ms_x10", present_ms_x10);
+            lite_log_u32(
+                "logic_avg_ms_x10",
+                timing_average_x10(&logic_timing)
+            );
+            lite_log_u32(
+                "logic_max_ms", logic_timing.maximum_ms
+            );
+            lite_log_u32(
+                "logic_fire_avg_ms_x10",
+                timing_average_x10(&fire_logic_timing)
+            );
+            lite_log_u32(
+                "logic_fire_max_ms",
+                fire_logic_timing.maximum_ms
+            );
+            lite_log_u32(
+                "logic_player_avg_ms_x10",
+                timing_average_x10(&player_logic_timing)
+            );
+            lite_log_u32(
+                "logic_player_max_ms",
+                player_logic_timing.maximum_ms
+            );
+            lite_log_u32(
+                "logic_bot_avg_ms_x10",
+                timing_average_x10(&bot_logic_timing)
+            );
+            lite_log_u32(
+                "logic_bot_max_ms",
+                bot_logic_timing.maximum_ms
+            );
+            lite_log_u32(
+                "logic_objective_avg_ms_x10",
+                timing_average_x10(&objective_logic_timing)
+            );
+            lite_log_u32(
+                "logic_objective_max_ms",
+                objective_logic_timing.maximum_ms
+            );
+            lite_log_u32(
+                "logic_steps_avg_x10",
+                timing_average_x10(&logic_steps_timing)
+            );
+            lite_log_u32(
+                "logic_steps_max", logic_steps_timing.maximum_ms
+            );
+            lite_log_u32(
+                "logic_skipped_steps", logic_skipped_steps_window
+            );
+            lite_log_u32(
+                "audio_avg_ms_x10",
+                timing_average_x10(&audio_timing)
+            );
+            lite_log_u32(
+                "audio_max_ms", audio_timing.maximum_ms
+            );
+            lite_log_u32(
+                "world_avg_ms_x10",
+                timing_average_x10(&world_timing)
+            );
+            lite_log_u32(
+                "world_max_ms", world_timing.maximum_ms
+            );
+            lite_log_u32(
+                "world_clear_avg_ms_x10",
+                timing_average_x10(&world_clear_timing)
+            );
+            lite_log_u32(
+                "world_clear_max_ms",
+                world_clear_timing.maximum_ms
+            );
+            lite_log_u32(
+                "entities_avg_ms_x10",
+                timing_average_x10(&entity_timing)
+            );
+            lite_log_u32(
+                "entities_max_ms", entity_timing.maximum_ms
+            );
+            lite_log_u32(
+                "view_avg_ms_x10",
+                timing_average_x10(&view_timing)
+            );
+            lite_log_u32(
+                "view_max_ms", view_timing.maximum_ms
+            );
+            lite_log_u32(
+                "hud_avg_ms_x10",
+                timing_average_x10(&hud_timing)
+            );
+            lite_log_u32(
+                "hud_max_ms", hud_timing.maximum_ms
+            );
+            lite_log_u32(
+                "present_avg_ms_x10",
+                timing_average_x10(&present_timing)
+            );
+            lite_log_u32(
+                "present_max_ms", present_timing.maximum_ms
+            );
             lite_log_u32("screen", (uint32_t)screen);
             lite_log_u32("round", round);
             lite_log_u32("rounds_t", rounds_t);
@@ -6195,6 +7021,9 @@ int bda_main(void)
             );
             lite_log_u32("bot_shots", bot_shots);
             lite_log_u32("bot_hits", bot_hits);
+            lite_log_u32(
+                "bot_visibility_traces", bot_visibility_traces
+            );
             lite_log_u32("bot_difficulty", bot_difficulty);
             lite_log_u32(
                 "hostages_rescued",
@@ -6218,10 +7047,17 @@ int bda_main(void)
             );
             lite_log_u32("world_triangles", stats.drawn_triangles);
             lite_log_u32("world_pixels", stats.drawn_pixels);
+            lite_log_u32(
+                "world_tested_pixels", stats.tested_pixels
+            );
             lite_log_u32("visible_surfaces", stats.visible_surfaces);
             lite_log_u32("drawn_surfaces", stats.drawn_surfaces);
             lite_log_u32("entity_triangles", entity_stats.triangles);
             lite_log_u32("entity_pixels", entity_stats.pixels);
+            lite_log_u32(
+                "entity_pvs_culled",
+                frame_timing.entity_pvs_culled
+            );
             lite_log_u32("view_triangles", view_stats.triangles);
             lite_log_u32("view_pixels", view_stats.pixels);
             lite_log_u32(
@@ -6238,11 +7074,26 @@ int bda_main(void)
             lite_log_i32("bot3_y", bots[3].mover.y);
             lite_log_u32("bot3_nav", bots[3].nav_index);
             lite_log_u32("bot3_health", bots[3].health);
+            timing_reset(&logic_timing);
+            timing_reset(&fire_logic_timing);
+            timing_reset(&player_logic_timing);
+            timing_reset(&bot_logic_timing);
+            timing_reset(&objective_logic_timing);
+            timing_reset(&logic_steps_timing);
+            timing_reset(&audio_timing);
+            timing_reset(&world_timing);
+            timing_reset(&world_clear_timing);
+            timing_reset(&entity_timing);
+            timing_reset(&view_timing);
+            timing_reset(&hud_timing);
+            timing_reset(&present_timing);
+            logic_skipped_steps_window = 0u;
             next_metric = now + METRIC_INTERVAL_MS;
         }
-        (void)c15_audio_service(
+        service_audio_throttled(
             &audio, &g_pak, g_load_scratch,
-            sizeof(g_load_scratch)
+            sizeof(g_load_scratch), now,
+            &next_audio_service, &pending_audio_ms
         );
         lite_platform_delay(1u);
     }
@@ -6255,6 +7106,13 @@ int bda_main(void)
         "texture_cache_reloads", g_map.texture_cache_reloads
     );
     lite_log_u32("model_peak_bytes", (uint32_t)model_arena.peak);
+    lite_log_u32(
+        "animation_peak_bytes",
+        (uint32_t)g_animation_arena.peak
+    );
+    lite_log_u32(
+        "view_cache_resident_bytes", view_cache_memory_bytes
+    );
     lite_log_u32("shots_fired", shots_fired);
     lite_log_u32("shots_hit", shots_hit);
     lite_log_u32(
@@ -6263,6 +7121,8 @@ int bda_main(void)
     lite_log_u32("spectator_target", spectator_target);
     lite_log_u32("bot_shots", bot_shots);
     lite_log_u32("bot_hits", bot_hits);
+    lite_log_u32("bot_visibility_traces", bot_visibility_traces);
+    lite_log_u32("logic_skipped_steps", logic_skipped_steps);
     lite_log_u32("bot_difficulty", bot_difficulty);
     lite_log_u32("audio_enabled", audio_enabled);
     lite_log_u32("audio_blocks", audio.blocks_written);
@@ -6277,7 +7137,7 @@ int bda_main(void)
     c15_audio_stop(
         &audio, g_load_scratch, sizeof(g_load_scratch)
     );
-    lite_log_line("CS15 Lite M19 classic world/player textures stop");
+    lite_log_line("CS15 Lite M20 performance pass 7 stop");
     lite_log_close();
     c15_pak_close(&g_pak);
     if (map_memory) {
@@ -6285,6 +7145,12 @@ int bda_main(void)
     }
     if (texture_memory) {
         bda_free(texture_memory);
+    }
+    if (audio_memory) {
+        bda_free(audio_memory);
+    }
+    if (view_cache_memory) {
+        bda_free(view_cache_memory);
     }
     lite_platform_close();
     return 0;

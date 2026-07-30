@@ -109,7 +109,17 @@ int main(void)
     /* Affine UV at (160,120) is approximately (7,3). */
     assert(frame[120 * WIDTH + 160] == palette[3u * 16u + 7u]);
     assert(depth[120 * WIDTH + 160] < 0xffffu);
-    assert(depth[0] == 0xffffu);
+    /*
+     * View depth is cleared lazily in touched 8x8 tiles. World depth
+     * outside the weapon footprint remains intact until the next frame.
+     */
+    assert(depth[0] == 0u);
+    depth[120 * WIDTH + 160] = 0u;
+    frame[120 * WIDTH + 160] = 0u;
+    c15_render_view_model(
+        &model, &framebuffer, depth, &view, 0, 0, &stats
+    );
+    assert(frame[120 * WIDTH + 160] == palette[3u * 16u + 7u]);
     puts("model_render_test: PASS");
     return 0;
 }

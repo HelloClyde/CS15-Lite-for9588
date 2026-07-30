@@ -77,6 +77,30 @@ int c15_audio_init(
     return 1;
 }
 
+uint32_t c15_audio_resident_size(const c15_audio_t *audio)
+{
+    return audio && audio->loaded ? audio->bank.packed_size : 0u;
+}
+
+int c15_audio_load_resident(
+    c15_audio_t *audio,
+    const c15_pak_t *pak,
+    void *memory,
+    uint32_t memory_size
+)
+{
+    if (!audio || !audio->loaded || !pak || !memory ||
+        memory_size < audio->bank.packed_size ||
+        !c15_pak_read(
+            pak, &audio->bank, 0u,
+            memory, audio->bank.packed_size)) {
+        return 0;
+    }
+    audio->resident_bank = (const uint8_t *)memory;
+    audio->resident_bytes = audio->bank.packed_size;
+    return 1;
+}
+
 void c15_audio_set_enabled(
     c15_audio_t *audio,
     int enabled,
@@ -130,15 +154,14 @@ int c15_audio_service(
 )
 {
     int16_t *output = (int16_t *)scratch;
-    int16_t *source = (int16_t *)(
-        (uint8_t *)scratch + C15_SOUND_BLOCK_BYTES
-    );
     uint32_t advances[2] = {0u, 0u};
     uint32_t channel;
     uint32_t active = 0u;
     int written;
     if (!audio->enabled || !audio->opened || !audio->loaded ||
-        scratch_size < C15_SOUND_BLOCK_BYTES * 2u) {
+        scratch_size < C15_SOUND_BLOCK_BYTES ||
+        (!audio->resident_bank &&
+         scratch_size < C15_SOUND_BLOCK_BYTES * 2u)) {
         return 0;
     }
     if (audio->voices[0].remaining == 0u &&
@@ -152,6 +175,7 @@ int c15_audio_service(
     bda_memset(output, 0, C15_SOUND_BLOCK_BYTES);
     for (channel = 0u; channel < 2u; ++channel) {
         c15_sound_voice_t *voice = &audio->voices[channel];
+        const int16_t *source;
         uint32_t bytes;
         uint32_t sample;
         if (voice->remaining == 0u) {
@@ -159,10 +183,25 @@ int c15_audio_service(
         }
         bytes = voice->remaining < C15_SOUND_BLOCK_BYTES / 2u ?
             voice->remaining : C15_SOUND_BLOCK_BYTES / 2u;
-        if (!c15_pak_read(
-                pak, &audio->bank, voice->offset, source, bytes)) {
-            voice->remaining = 0u;
-            continue;
+        if (audio->resident_bank) {
+            if (voice->offset > audio->resident_bytes ||
+                bytes > audio->resident_bytes - voice->offset) {
+                voice->remaining = 0u;
+                continue;
+            }
+            source = (const int16_t *)(
+                audio->resident_bank + voice->offset
+            );
+        } else {
+            source = (const int16_t *)(
+                (uint8_t *)scratch + C15_SOUND_BLOCK_BYTES
+            );
+            if (!c15_pak_read(
+                    pak, &audio->bank, voice->offset,
+                    (void *)source, bytes)) {
+                voice->remaining = 0u;
+                continue;
+            }
         }
         for (sample = 0u; sample < bytes / 2u; ++sample) {
             uint32_t first = sample * 2u;

@@ -9,8 +9,13 @@
 #define NEAR_PLANE 8
 #define DEFAULT_FOCAL_LENGTH ((int)LITE_VIEW_WIDTH / 2)
 #define SURF_PLANEBACK 0x8000u
-/* M19 peak visible set: cs_office; keep room for all converted surfaces. */
-#define MAX_CACHED_VISIBLE_SURFACES 1536u
+/*
+ * The surface bitset can represent 10240 converted world surfaces. Keep the
+ * cached index list at the same capacity so a dense PVS never turns into an
+ * empty world merely because its visible set is larger than a small map's.
+ * Historical cs_italy peaks at 3980 visible surfaces in one leaf.
+ */
+#define MAX_CACHED_VISIBLE_SURFACES (C15_MAP_VISIBLE_BYTES * 8u)
 
 typedef struct view_vertex {
     int32_t x;
@@ -46,10 +51,126 @@ typedef uint32_t depth_alias_u32 __attribute__((__may_alias__));
 
 static const c15_map_t *g_cached_map;
 static uint8_t *g_cached_surface_bits;
+static uint8_t g_cached_leaf_bits[C15_MAP_VISIBILITY_BYTES];
 static uint16_t g_cached_surface_indices[MAX_CACHED_VISIBLE_SURFACES];
 static uint32_t g_cached_surface_count;
 static uint32_t g_cached_visible_leaves;
+static uint32_t g_cached_source_crc32;
 static int g_cached_leaf = -1;
+
+static uint32_t fractional_divide_q16_world(
+    uint32_t remainder,
+    uint32_t denominator,
+    uint32_t *final_remainder
+)
+{
+    uint32_t result = 0u;
+    uint32_t bit;
+    for (bit = 0u; bit < 16u; ++bit) {
+        result <<= 1;
+        if (remainder >= denominator - remainder) {
+            remainder -= denominator - remainder;
+            result |= 1u;
+        } else {
+            remainder += remainder;
+        }
+    }
+    if (final_remainder) {
+        *final_remainder = remainder;
+    }
+    return result;
+}
+
+static int32_t divide_i64_i32_world(
+    int64_t numerator, int32_t denominator
+)
+{
+    uint64_t magnitude;
+    uint32_t divisor;
+    uint32_t quotient;
+    int negative;
+    if (denominator == 0) {
+        return 0;
+    }
+    negative = numerator < 0;
+    magnitude = negative ?
+        (uint64_t)(-(numerator + 1)) + 1u :
+        (uint64_t)numerator;
+    if (denominator < 0) {
+        negative = !negative;
+        divisor = (uint32_t)(-denominator);
+    } else {
+        divisor = (uint32_t)denominator;
+    }
+    if (magnitude <= 0xffffffffu) {
+        quotient = (uint32_t)magnitude / divisor;
+    } else {
+        uint32_t high = (uint32_t)(magnitude >> 32);
+        uint32_t remainder;
+        uint32_t digit;
+        uint64_t accumulated = 0u;
+        int shift;
+        if (high >= divisor) {
+            return (int32_t)(numerator / denominator);
+        }
+        remainder = high;
+        for (shift = 16; shift >= 0; shift -= 16) {
+            uint32_t combined;
+            digit = fractional_divide_q16_world(
+                remainder, divisor, &remainder
+            );
+            combined = remainder +
+                ((uint32_t)(magnitude >> shift) & 0xffffu);
+            digit += combined / divisor;
+            remainder = combined % divisor;
+            accumulated = accumulated * 65536u + digit;
+        }
+        if (accumulated > 0xffffffffu) {
+            return (int32_t)(numerator / denominator);
+        }
+        quotient = (uint32_t)accumulated;
+    }
+    return negative ?
+        (int32_t)(0u - quotient) : (int32_t)quotient;
+}
+
+static int32_t fixed_divide_q16_world(
+    int64_t numerator, int32_t denominator
+)
+{
+    uint32_t divisor;
+    uint32_t magnitude;
+    uint32_t whole;
+    uint32_t remainder;
+    uint32_t result;
+    int negative;
+    if (denominator == 0) {
+        return 0;
+    }
+    negative = numerator < 0;
+    if (denominator < 0) {
+        negative = !negative;
+        divisor = (uint32_t)(-denominator);
+    } else {
+        divisor = (uint32_t)denominator;
+    }
+    if (numerator < -2147483647LL ||
+        numerator > 2147483647LL) {
+        return (int32_t)((numerator * 65536) / denominator);
+    }
+    magnitude = numerator < 0 ?
+        (uint32_t)(-numerator) : (uint32_t)numerator;
+    whole = magnitude / divisor;
+    if (whole > 32767u) {
+        return (int32_t)((numerator * 65536) / denominator);
+    }
+    remainder = magnitude - whole * divisor;
+    result = (whole << 16) |
+        fractional_divide_q16_world(
+            remainder, divisor, 0
+        );
+    return negative ? (int32_t)(0u - result) : (int32_t)result;
+}
 
 static inline __attribute__((always_inline)) int wrap_coordinate(
     int value, uint16_t size, uint16_t mask, uint16_t reciprocal
@@ -59,6 +180,9 @@ static inline __attribute__((always_inline)) int wrap_coordinate(
     uint32_t result;
     if (value < 0) {
         value = 0;
+    }
+    if ((uint32_t)value < size) {
+        return value;
     }
     if (mask != 0u) {
         return value & mask;
@@ -123,21 +247,21 @@ static view_vertex_t transform_vertex(
      * GoldSrc's view-right vector is (sin(yaw), -cos(yaw)). At yaw zero,
      * world -Y must therefore appear on the right side of the screen.
      */
-    result.x = (int32_t)(
-        ((int64_t)sine * dx - (int64_t)cosine * dy) >> 14
-    );
-    forward = (int32_t)(
-        ((int64_t)cosine * dx + (int64_t)sine * dy) >> 14
-    );
+    /*
+     * Converted world coordinates are signed 16-bit values. A rotation of
+     * any two such deltas remains inside signed 32-bit Q14, so using the
+     * MIPS32 multiply path here is exact and avoids four 64-bit helpers for
+     * every visible polygon vertex.
+     */
+    result.x = (sine * dx - cosine * dy) >> 14;
+    forward = (cosine * dx + sine * dy) >> 14;
     vertical = (int32_t)source->z - camera->z;
-    result.y = (int32_t)(
-        ((int64_t)pitch_cosine * vertical -
-         (int64_t)pitch_sine * forward) >> 14
-    );
-    result.z = (int32_t)(
-        ((int64_t)pitch_sine * vertical +
-         (int64_t)pitch_cosine * forward) >> 14
-    );
+    result.y = (
+        pitch_cosine * vertical - pitch_sine * forward
+    ) >> 14;
+    result.z = (
+        pitch_sine * vertical + pitch_cosine * forward
+    ) >> 14;
     result.u = source->u;
     result.v = source->v;
     return result;
@@ -203,7 +327,9 @@ static view_vertex_t clip_intersection(
     view_vertex_t result;
     int32_t denominator = inside_distance - outside_distance;
     int32_t fraction = denominator != 0 ?
-        (int32_t)(((int64_t)inside_distance << 16) / denominator) : 0;
+        fixed_divide_q16_world(
+            (int64_t)inside_distance, denominator
+        ) : 0;
     result.x = inside->x +
         (int32_t)(((int64_t)(outside->x - inside->x) * fraction) >> 16);
     result.y = inside->y +
@@ -265,11 +391,13 @@ static screen_vertex_t project_vertex(
 )
 {
     screen_vertex_t result;
-    result.x = (int32_t)(LITE_VIEW_WIDTH / 2u) + (int32_t)(
-        ((int64_t)source->x * focal) / source->z
+    result.x = (int32_t)(LITE_VIEW_WIDTH / 2u) +
+        divide_i64_i32_world(
+            (int64_t)source->x * focal, source->z
     );
-    result.y = (int32_t)(LITE_VIEW_HEIGHT / 2u) - (int32_t)(
-        ((int64_t)source->y * focal) / source->z
+    result.y = (int32_t)(LITE_VIEW_HEIGHT / 2u) -
+        divide_i64_i32_world(
+            (int64_t)source->y * focal, source->z
     );
     result.z = source->z;
     result.u = source->u * 4096;
@@ -288,8 +416,8 @@ static void edge_begin(
     int advance = start_y - start->y;
     edge->x = (int32_t)((int64_t)start->x * 65536);
     if (dy != 0) {
-        edge->dx = (int32_t)(
-            ((int64_t)(end->x - start->x) * 65536) / dy
+        edge->dx = fixed_divide_q16_world(
+            (int64_t)(end->x - start->x), dy
         );
     } else {
         edge->dx = 0;
@@ -300,25 +428,6 @@ static void edge_begin(
 static void edge_step(scan_edge_t *edge)
 {
     edge->x += edge->dx;
-}
-
-static inline __attribute__((always_inline)) uint16_t shade_world_texel(
-    uint16_t color, uint8_t level
-)
-{
-    switch (level) {
-    case 0u:
-        return (uint16_t)((color & 0xe79cu) >> 2);
-    case 1u:
-        return (uint16_t)((color & 0xf7deu) >> 1);
-    case 2u:
-        return (uint16_t)(
-            ((color & 0xf7deu) >> 1) +
-            ((color & 0xe79cu) >> 2)
-        );
-    default:
-        return color;
-    }
 }
 
 static void draw_half(
@@ -339,7 +448,21 @@ static void draw_half(
     int32_t row_u;
     int32_t row_v;
     int32_t row_z;
+    uint32_t drawn_pixels = 0u;
     uint8_t light_level = (uint8_t)(light >> 6);
+    const uint16_t *palette = texture->palette;
+    const uint8_t *texture_pixels = texture->pixels;
+    uint16_t texture_width = texture->width;
+    uint16_t width_mask = texture->width_mask;
+    uint16_t height_mask = texture->height_mask;
+    int opaque = (texture->flags & 1u) == 0u;
+    int opaque_power_of_two =
+        opaque &&
+        width_mask != 0u && height_mask != 0u;
+    if (light_level < 3u && texture->shade_palettes) {
+        palette = texture->shade_palettes +
+            (uint32_t)light_level * texture->palette_count;
+    }
     if (y_start < 0) {
         int skip = -y_start;
         first->x += first->dx * skip;
@@ -370,7 +493,6 @@ static void draw_half(
         int x0;
         int x1;
         int width;
-        int x;
         int32_t u;
         int32_t v;
         int32_t z;
@@ -397,35 +519,103 @@ static void draw_half(
             if (x1 >= fb->width) {
                 x1 = fb->width - 1;
             }
-            frame_row = fb->pixels + y * fb->stride;
-            depth_row = depth + y * LITE_VIEW_WIDTH;
-            for (x = x0; x <= x1; ++x) {
-                uint32_t depth_value = (uint32_t)(z >> 16);
-                if (depth_value > 0u && depth_value < depth_row[x]) {
-                    int tx = wrap_coordinate(
-                        u >> 16, texture->width,
-                        texture->width_mask, texture->width_reciprocal
-                    );
-                    int ty = wrap_coordinate(
-                        v >> 16, texture->height,
-                        texture->height_mask, texture->height_reciprocal
-                    );
-                    uint8_t texel = texture->pixels[
-                        ty * texture->width + tx
-                    ];
-                    if ((texture->flags & 1u) == 0u ||
-                        texel + 1u != texture->palette_count) {
-                        depth_row[x] = (uint16_t)depth_value;
-                        frame_row[x] =
-                            shade_world_texel(
-                                texture->palette[texel], light_level
+            if (x0 <= x1) {
+                int remaining = x1 - x0 + 1;
+                uint16_t *frame_pixel;
+                uint16_t *depth_pixel;
+                stats->tested_pixels += (uint32_t)remaining;
+                frame_row = fb->pixels + y * fb->stride;
+                depth_row = depth + y * LITE_VIEW_WIDTH;
+                frame_pixel = frame_row + x0;
+                depth_pixel = depth_row + x0;
+                if (opaque_power_of_two) {
+                    while (remaining-- > 0) {
+                        uint32_t depth_value =
+                            (uint32_t)(z >> 16);
+                        if (depth_value > 0u &&
+                            depth_value < *depth_pixel) {
+                            int texture_u = u >> 16;
+                            int texture_v = v >> 16;
+                            int tx = texture_u < 0 ?
+                                0 : texture_u & width_mask;
+                            int ty = texture_v < 0 ?
+                                0 : texture_v & height_mask;
+                            uint8_t texel = texture_pixels[
+                                ty * texture_width + tx
+                            ];
+                            *depth_pixel = (uint16_t)depth_value;
+                            *frame_pixel = palette[texel];
+                            ++drawn_pixels;
+                        }
+                        ++frame_pixel;
+                        ++depth_pixel;
+                        u += gradient->du_dx;
+                        v += gradient->dv_dx;
+                        z += gradient->dz_dx;
+                    }
+                } else if (opaque) {
+                    while (remaining-- > 0) {
+                        uint32_t depth_value =
+                            (uint32_t)(z >> 16);
+                        if (depth_value > 0u &&
+                            depth_value < *depth_pixel) {
+                            int tx = wrap_coordinate(
+                                u >> 16, texture_width,
+                                width_mask,
+                                texture->width_reciprocal
                             );
-                        ++stats->drawn_pixels;
+                            int ty = wrap_coordinate(
+                                v >> 16, texture->height,
+                                height_mask,
+                                texture->height_reciprocal
+                            );
+                            uint8_t texel = texture_pixels[
+                                ty * texture_width + tx
+                            ];
+                            *depth_pixel = (uint16_t)depth_value;
+                            *frame_pixel = palette[texel];
+                            ++drawn_pixels;
+                        }
+                        ++frame_pixel;
+                        ++depth_pixel;
+                        u += gradient->du_dx;
+                        v += gradient->dv_dx;
+                        z += gradient->dz_dx;
+                    }
+                } else {
+                    while (remaining-- > 0) {
+                        uint32_t depth_value =
+                            (uint32_t)(z >> 16);
+                        if (depth_value > 0u &&
+                            depth_value < *depth_pixel) {
+                            int tx = wrap_coordinate(
+                                u >> 16, texture_width,
+                                width_mask,
+                                texture->width_reciprocal
+                            );
+                            int ty = wrap_coordinate(
+                                v >> 16, texture->height,
+                                height_mask,
+                                texture->height_reciprocal
+                            );
+                            uint8_t texel = texture_pixels[
+                                ty * texture_width + tx
+                            ];
+                            if (texel + 1u !=
+                                texture->palette_count) {
+                                *depth_pixel =
+                                    (uint16_t)depth_value;
+                                *frame_pixel = palette[texel];
+                                ++drawn_pixels;
+                            }
+                        }
+                        ++frame_pixel;
+                        ++depth_pixel;
+                        u += gradient->du_dx;
+                        v += gradient->dv_dx;
+                        z += gradient->dz_dx;
                     }
                 }
-                u += gradient->du_dx;
-                v += gradient->dv_dx;
-                z += gradient->dz_dx;
             }
         }
         edge_step(first);
@@ -434,6 +624,7 @@ static void draw_half(
         row_v += gradient->dv_dy;
         row_z += gradient->dz_dy;
     }
+    stats->drawn_pixels += drawn_pixels;
 }
 
 static void draw_triangle(
@@ -458,36 +649,54 @@ static void draw_triangle(
     int dy1;
     int dx2;
     int dy2;
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
     if (area == 0) {
+        return;
+    }
+    min_x = a.x < b.x ? a.x : b.x;
+    if (c.x < min_x) min_x = c.x;
+    max_x = a.x > b.x ? a.x : b.x;
+    if (c.x > max_x) max_x = c.x;
+    min_y = a.y < b.y ? a.y : b.y;
+    if (c.y < min_y) min_y = c.y;
+    max_y = a.y > b.y ? a.y : b.y;
+    if (c.y > max_y) max_y = c.y;
+    if (max_x < 0 || min_x >= fb->width ||
+        max_y <= 0 || min_y >= fb->height) {
         return;
     }
     dx1 = b.x - a.x;
     dy1 = b.y - a.y;
     dx2 = c.x - a.x;
     dy2 = c.y - a.y;
-    gradient.du_dx = (int32_t)(
+    gradient.du_dx = divide_i64_i32_world(
         ((int64_t)(b.u - a.u) * dy2 -
-         (int64_t)(c.u - a.u) * dy1) / area
+         (int64_t)(c.u - a.u) * dy1), area
     );
-    gradient.du_dy = (int32_t)(
+    gradient.du_dy = divide_i64_i32_world(
         ((int64_t)dx1 * (c.u - a.u) -
-         (int64_t)dx2 * (b.u - a.u)) / area
+         (int64_t)dx2 * (b.u - a.u)), area
     );
-    gradient.dv_dx = (int32_t)(
+    gradient.dv_dx = divide_i64_i32_world(
         ((int64_t)(b.v - a.v) * dy2 -
-         (int64_t)(c.v - a.v) * dy1) / area
+         (int64_t)(c.v - a.v) * dy1), area
     );
-    gradient.dv_dy = (int32_t)(
+    gradient.dv_dy = divide_i64_i32_world(
         ((int64_t)dx1 * (c.v - a.v) -
-         (int64_t)dx2 * (b.v - a.v)) / area
+         (int64_t)dx2 * (b.v - a.v)), area
     );
-    gradient.dz_dx = (int32_t)(
-        (((int64_t)(b.z - a.z) * dy2 -
-          (int64_t)(c.z - a.z) * dy1) * 65536) / area
+    gradient.dz_dx = fixed_divide_q16_world(
+        (int64_t)(b.z - a.z) * dy2 -
+            (int64_t)(c.z - a.z) * dy1,
+        area
     );
-    gradient.dz_dy = (int32_t)(
-        (((int64_t)dx1 * (c.z - a.z) -
-          (int64_t)dx2 * (b.z - a.z)) * 65536) / area
+    gradient.dz_dy = fixed_divide_q16_world(
+        (int64_t)dx1 * (c.z - a.z) -
+            (int64_t)dx2 * (b.z - a.z),
+        area
     );
     if (a.y > b.y) { temp = a; a = b; b = temp; }
     if (b.y > c.y) { temp = b; b = c; c = temp; }
@@ -559,8 +768,10 @@ void c15_render_world(
     int32_t pitch_cosine = cos_q14_q8((uint16_t)camera->pitch_q8);
     int focal = camera->focal_length != 0u ?
         camera->focal_length : DEFAULT_FOCAL_LENGTH;
+    uint32_t clear_started;
 
     bda_memset(stats, 0, sizeof(*stats));
+    clear_started = lite_platform_milliseconds();
     clear_depth_buffer(depth);
     lite_fb_rect(
         framebuffer, 0, 0, LITE_VIEW_WIDTH, LITE_VIEW_HEIGHT / 2,
@@ -571,6 +782,8 @@ void c15_render_world(
         LITE_VIEW_WIDTH, LITE_VIEW_HEIGHT / 2,
         lite_rgb565(45u, 41u, 35u)
     );
+    stats->clear_ms =
+        lite_platform_milliseconds() - clear_started;
     if (!surface_section) {
         return;
     }
@@ -579,12 +792,14 @@ void c15_render_world(
         return;
     }
     if (g_cached_map != map ||
+        g_cached_source_crc32 != map->source_crc32 ||
         g_cached_surface_bits != visible_surface_bits ||
         g_cached_leaf != camera_leaf) {
         uint32_t surface_index;
         g_cached_surface_count = 0u;
         if (!c15_map_build_visible(
                 map, camera, visible_surface_bits, visible_surface_bytes,
+                g_cached_leaf_bits, sizeof(g_cached_leaf_bits),
                 &g_cached_visible_leaves)) {
             g_cached_leaf = -1;
             return;
@@ -603,6 +818,7 @@ void c15_render_world(
             }
         }
         g_cached_map = map;
+        g_cached_source_crc32 = map->source_crc32;
         g_cached_surface_bits = visible_surface_bits;
         g_cached_leaf = camera_leaf;
         visibility_changed = 1;
@@ -611,8 +827,8 @@ void c15_render_world(
         map->stream_textures) {
         /*
          * The PVS includes back-facing surfaces. Remove those from the
-         * texture prefetch set so original-resolution packs do not spend the
-         * 2 MiB working set on materials that cannot be drawn from here.
+         * texture prefetch set so compatibility packs do not spend a bounded
+         * texture cache on materials that cannot be drawn from here.
          */
         for (list_index = 0u;
              list_index < g_cached_surface_count; ++list_index) {
@@ -714,4 +930,37 @@ void c15_render_world(
         }
         ++stats->drawn_surfaces;
     }
+}
+
+int c15_render_world_point_visible(
+    const c15_map_t *map, int32_t x, int32_t y, int32_t z
+)
+{
+    c15_camera_t point;
+    int leaf;
+    if (!map || g_cached_map != map ||
+        g_cached_source_crc32 != map->source_crc32 ||
+        g_cached_leaf <= 0) {
+        /*
+         * The test is an optimization only. If the renderer has no current
+         * PVS, keep the entity instead of risking a visible pop.
+         */
+        return 1;
+    }
+    bda_memset(&point, 0, sizeof(point));
+    point.x = x;
+    point.y = y;
+    point.z = z;
+    leaf = c15_map_camera_leaf(map, &point);
+    if (leaf <= 0 ||
+        (uint32_t)leaf > C15_MAP_MAX_VISIBILITY_LEAVES) {
+        return 1;
+    }
+    if (leaf == g_cached_leaf) {
+        return 1;
+    }
+    return (
+        g_cached_leaf_bits[((uint32_t)leaf - 1u) >> 3] &
+        (uint8_t)(1u << (((uint32_t)leaf - 1u) & 7u))
+    ) != 0u;
 }

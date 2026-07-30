@@ -50,6 +50,8 @@ typedef struct c15_model_animation_sequence {
 
 typedef struct c15_model_animation {
     c15_pak_entry_t entry;
+    const uint8_t *resident_chunk;
+    uint32_t resident_bytes;
     uint32_t vertex_count;
     uint32_t frame_stride;
     uint32_t sequence_count;
@@ -81,6 +83,11 @@ int c15_model_locomotion_open(
     const char *name,
     void *scratch,
     uint32_t scratch_size
+);
+int c15_model_animation_make_resident(
+    c15_model_animation_t *animation,
+    const c15_pak_t *pak,
+    lite_arena_t *arena
 );
 int c15_model_animation_apply(
     const c15_model_animation_t *animation,

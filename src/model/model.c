@@ -301,6 +301,58 @@ int c15_model_locomotion_open(
     );
 }
 
+int c15_model_animation_make_resident(
+    c15_model_animation_t *animation,
+    const c15_pak_t *pak,
+    lite_arena_t *arena
+)
+{
+    uint8_t *chunk;
+    size_t used;
+    if (!animation || !animation->loaded || !pak || !arena ||
+        animation->entry.packed_size < ANIMATION_HEADER_BYTES) {
+        return 0;
+    }
+    used = arena->used;
+    chunk = (uint8_t *)lite_arena_alloc(
+        arena, animation->entry.packed_size, 16u
+    );
+    if (!chunk ||
+        !c15_pak_read(
+            pak, &animation->entry, 0u, chunk,
+            animation->entry.packed_size) ||
+        !bytes_equal(chunk, "C15ANM1\0", 8u) ||
+        read_u32(chunk + 12) != animation->entry.packed_size) {
+        lite_arena_rewind(arena, used);
+        return 0;
+    }
+    animation->resident_chunk = chunk;
+    animation->resident_bytes = animation->entry.packed_size;
+    return 1;
+}
+
+static void apply_animation_positions(
+    c15_model_t *model,
+    uint32_t first_vertex,
+    const uint8_t *positions,
+    uint32_t count
+)
+{
+    uint32_t index;
+    for (index = 0u; index < count; ++index) {
+        uint8_t *target =
+            model->vertices + (first_vertex + index) * MODEL_VERTEX_BYTES;
+        const uint8_t *position =
+            positions + index * ANIMATION_POSITION_BYTES;
+        target[0] = position[0];
+        target[1] = position[1];
+        target[2] = position[2];
+        target[3] = position[3];
+        target[4] = position[4];
+        target[5] = position[5];
+    }
+}
+
 int c15_model_animation_apply(
     const c15_model_animation_t *animation,
     c15_model_t *model,
@@ -317,8 +369,7 @@ int c15_model_animation_apply(
     uint32_t vertex = 0u;
     uint32_t source_offset;
     if (!animation || !animation->loaded || !model || !model->loaded ||
-        !pak || action >= animation->sequence_count ||
-        !scratch || scratch_size < ANIMATION_POSITION_BYTES ||
+        action >= animation->sequence_count ||
         animation->vertex_count != model->vertex_count) {
         return 0;
     }
@@ -326,13 +377,29 @@ int c15_model_animation_apply(
     if (frame >= sequence->frame_count) {
         return 0;
     }
-    records_per_read = scratch_size / ANIMATION_POSITION_BYTES;
     source_offset = sequence->frame_offset +
         frame * animation->frame_stride;
+    if (animation->resident_chunk) {
+        if (source_offset > animation->resident_bytes ||
+            animation->frame_stride >
+                animation->resident_bytes - source_offset) {
+            return 0;
+        }
+        apply_animation_positions(
+            model, 0u,
+            animation->resident_chunk + source_offset,
+            animation->vertex_count
+        );
+        return 1;
+    }
+    if (!pak || !scratch ||
+        scratch_size < ANIMATION_POSITION_BYTES) {
+        return 0;
+    }
+    records_per_read = scratch_size / ANIMATION_POSITION_BYTES;
     while (vertex < animation->vertex_count) {
         uint32_t count = animation->vertex_count - vertex;
         uint32_t bytes;
-        uint32_t index;
         if (count > records_per_read) {
             count = records_per_read;
         }
@@ -342,18 +409,7 @@ int c15_model_animation_apply(
                 input, bytes)) {
             return 0;
         }
-        for (index = 0u; index < count; ++index) {
-            uint8_t *target =
-                model->vertices + (vertex + index) * MODEL_VERTEX_BYTES;
-            const uint8_t *position =
-                input + index * ANIMATION_POSITION_BYTES;
-            target[0] = position[0];
-            target[1] = position[1];
-            target[2] = position[2];
-            target[3] = position[3];
-            target[4] = position[4];
-            target[5] = position[5];
-        }
+        apply_animation_positions(model, vertex, input, count);
         vertex += count;
         source_offset += bytes;
     }

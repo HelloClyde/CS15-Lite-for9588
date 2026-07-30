@@ -120,6 +120,7 @@ int main(void)
     uint8_t ladder_data[14] = {0};
     uint8_t rescue_data[14] = {0};
     uint8_t surface_bits[1] = {0};
+    uint8_t visible_leaf_bits[C15_MAP_VISIBILITY_BYTES] = {0};
     c15_map_section_t planes = {0};
     c15_map_section_t nodes = {0};
     c15_map_section_t leaves = {0};
@@ -242,10 +243,20 @@ int main(void)
     camera.x = -10;
     expected_visibility_offset = 100u;
     assert(c15_map_build_visible(
-        &map, &camera, surface_bits, sizeof(surface_bits), &visible_leaves
+        &map, &camera, surface_bits, sizeof(surface_bits),
+        visible_leaf_bits, sizeof(visible_leaf_bits), &visible_leaves
     ));
     assert(surface_bits[0] == 1u);
     assert(visible_leaves == 1u);
+    assert(visible_leaf_bits[0] == 0u);
+    put_i32(leaf_data + 16, -1);
+    assert(c15_map_build_visible(
+        &map, &camera, surface_bits, sizeof(surface_bits),
+        visible_leaf_bits, sizeof(visible_leaf_bits), &visible_leaves
+    ));
+    assert(visible_leaf_bits[0] == 0xffu);
+    assert(visible_leaves == 1u);
+    put_i32(leaf_data + 16, 0);
 
     /*
      * A bounded cache must discard an older PVS texture when the next
@@ -326,7 +337,8 @@ int main(void)
     surface_bits[0] = 0u;
     visible_leaves = 0u;
     assert(c15_map_build_visible(
-        &map, &camera, surface_bits, sizeof(surface_bits), &visible_leaves
+        &map, &camera, surface_bits, sizeof(surface_bits),
+        0, 0u, &visible_leaves
     ));
     assert(surface_bits[0] == 1u);
     assert(visible_leaves == 1u);
